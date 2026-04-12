@@ -38,6 +38,12 @@ service cloud.firestore {
       allow update, delete: if false;
     }
 
+    // Chat settings: users can manage only their own settings documents
+    match /chatSettings/{docId} {
+      allow create: if request.auth != null && request.resource.data.userId == request.auth.uid;
+      allow read, update, delete: if request.auth != null && resource.data.userId == request.auth.uid;
+    }
+
     // Calls: authenticated users can read/write calls and ICE candidates
     match /calls/{docId} {
       allow read, write: if request.auth != null;

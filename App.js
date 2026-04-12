@@ -119,6 +119,7 @@ export default function App() {
     const [selectedFriend, setSelectedFriend] = useState(null);
     const [messageText, setMessageText] = useState("");
     const [editingMessage, setEditingMessage] = useState(null);
+    const [isChatMuted, setIsChatMuted] = useState(false);
     const flatListRef = useRef(null);
     const messageInputRef = useRef(null);
 
@@ -399,6 +400,29 @@ export default function App() {
 
         return () => clearTimeout(focusTimer);
     }, [screen, selectedFriend]);
+
+    useEffect(() => {
+        if (!currentUser || !selectedFriend) {
+            setIsChatMuted(false);
+            return;
+        }
+
+        const settingsId = `${currentUser.uid}_${selectedFriend.id}`;
+        const unsubscribe = getFirestore()
+            .collection('chatSettings')
+            .doc(settingsId)
+            .onSnapshot((doc) => {
+                if (doc.exists) {
+                    setIsChatMuted(!!doc.data()?.muted);
+                } else {
+                    setIsChatMuted(false);
+                }
+            }, () => {
+                setIsChatMuted(false);
+            });
+
+        return () => unsubscribe();
+    }, [currentUser, selectedFriend]);
 
     useEffect(() => {
         if (!currentUser) return;
@@ -811,6 +835,29 @@ export default function App() {
         const chatId = [currentUser.uid, selectedFriend.id].sort().join('_');
         const messages = chatMessages[chatId] || [];
         Alert.alert("Export Chat", `Export feature will be added soon.\nMessages available: ${messages.length}`);
+    };
+
+    const toggleChatNotifications = async () => {
+        if (!currentUser || !selectedFriend) return;
+
+        try {
+            const settingsId = `${currentUser.uid}_${selectedFriend.id}`;
+            const nextMuted = !isChatMuted;
+            await getFirestore()
+                .collection('chatSettings')
+                .doc(settingsId)
+                .set({
+                    userId: currentUser.uid,
+                    friendId: selectedFriend.id,
+                    muted: nextMuted,
+                    updatedAt: getFirestoreModule().FieldValue.serverTimestamp(),
+                }, { merge: true });
+
+            setIsChatMuted(nextMuted);
+            Alert.alert("Notifications", nextMuted ? "Notifications muted" : "Notifications enabled");
+        } catch (error) {
+            Alert.alert("Error", "Failed to update notification settings");
+        }
     };
 
     const openChatMainMenu = () => {
@@ -1387,8 +1434,8 @@ export default function App() {
                                 <TouchableOpacity style={styles.chatMenuItem} onPress={() => { closeChatMenus(); blockUser(selectedFriend.id, selectedFriend.fullName); }}>
                                     <Text style={styles.chatMenuItemText}>Block</Text>
                                 </TouchableOpacity>
-                                <TouchableOpacity style={styles.chatMenuItem} onPress={() => { closeChatMenus(); Alert.alert("Mute notifications", "Mute notifications option will be added soon."); }}>
-                                    <Text style={styles.chatMenuItemText}>Mute notifications</Text>
+                                <TouchableOpacity style={styles.chatMenuItem} onPress={() => { closeChatMenus(); toggleChatNotifications(); }}>
+                                    <Text style={styles.chatMenuItemText}>{isChatMuted ? "Unmute notifications" : "Mute notifications"}</Text>
                                 </TouchableOpacity>
                                 <TouchableOpacity style={styles.chatMenuItem} onPress={() => { closeChatMenus(); Alert.alert("Disappearing messages", "Disappearing messages is Off"); }}>
                                     <Text style={styles.chatMenuItemText}>Disappearing messages</Text>
@@ -1666,9 +1713,10 @@ export default function App() {
                     {/* Chat Settings */}
                     {isFriend && (
                         <View style={up.section}>
-                            <TouchableOpacity style={up.row}>
+                            <TouchableOpacity style={up.row} onPress={toggleChatNotifications}>
                                 <Text style={up.rowIcon}>🔔</Text>
                                 <Text style={up.rowText}>Notifications</Text>
+                                <Text style={up.rowValue}>{isChatMuted ? "Off" : "On"}</Text>
                                 <Text style={up.rowArrow}>›</Text>
                             </TouchableOpacity>
                             <View style={up.divider} />
