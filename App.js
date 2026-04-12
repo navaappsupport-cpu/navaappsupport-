@@ -19,6 +19,9 @@ import {
 } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 
+// Initialize Firebase App FIRST before any other Firebase modules
+require('@react-native-firebase/app');
+
 let firebaseAuth = null;
 let firebaseFirestore = null;
 
@@ -171,10 +174,6 @@ export default function App() {
             unsubscribe = getAuth().onAuthStateChanged(async (user) => {
                 try {
                     if (user) {
-                        if (!user.emailVerified) {
-                            setIsLoading(false);
-                            return;
-                        }
                         const userDoc = await getFirestore().collection('users').doc(user.uid).get();
                         if (userDoc.exists) {
                             setCurrentUser({ uid: user.uid, ...userDoc.data() });
@@ -198,14 +197,14 @@ export default function App() {
                     }
                 } catch (error) {
                     console.error("Firebase runtime error", error);
-                    setStartupError("Firebase failed to initialize. Please add a valid android/app/google-services.json and rebuild.");
+                    setStartupError("Firebase error: " + (error.message || String(error)));
                 } finally {
                     setIsLoading(false);
                 }
             });
         } catch (error) {
             console.error("Firebase startup failed", error);
-            setStartupError("Firebase failed to initialize. Please add a valid android/app/google-services.json and rebuild.");
+            setStartupError("Firebase startup failed: " + (error.message || String(error)));
             setIsLoading(false);
         }
         return () => unsubscribe && unsubscribe();
@@ -289,16 +288,7 @@ export default function App() {
         }
         setLoginLoading(true);
         try {
-            const userCredential = await getAuth().signInWithEmailAndPassword(loginEmail, loginPassword);
-            if (!userCredential.user.emailVerified) {
-                await userCredential.user.sendEmailVerification();
-                await getAuth().signOut();
-                Alert.alert(
-                    "Email Not Verified",
-                    "Please verify your email first. A new verification link has been sent to your inbox."
-                );
-                return;
-            }
+            await getAuth().signInWithEmailAndPassword(loginEmail, loginPassword);
             Alert.alert("Welcome", "Logged in successfully!");
         } catch (error) {
             Alert.alert("Error", error.message);
@@ -328,7 +318,6 @@ export default function App() {
         setLoginLoading(true);
         try {
             const userCredential = await getAuth().createUserWithEmailAndPassword(regEmail, regPassword);
-            await userCredential.user.sendEmailVerification();
             await getFirestore().collection('users').doc(userCredential.user.uid).set({
                 uid: userCredential.user.uid,
                 fullName: regFullName,
@@ -336,14 +325,9 @@ export default function App() {
                 bio: "New member",
                 createdAt: getFirestoreModule().FieldValue.serverTimestamp(),
             });
-            await getAuth().signOut();
-            Alert.alert(
-                "Verify Your Email",
-                "A verification link has been sent to " + regEmail + ". Please check your inbox (and spam folder) and verify your email before logging in."
-            );
+            Alert.alert("Welcome", "Account created successfully!");
             setRegFullName(""); setRegEmail("");
             setRegPassword(""); setRegConfirmPassword(""); setAgreeTerms(false);
-            setScreen("welcome");
         } catch (error) {
             Alert.alert("Error", error.message);
         } finally {
