@@ -210,21 +210,32 @@ export default function App() {
             unsubscribe = getAuth().onAuthStateChanged(async (user) => {
                 try {
                     if (user) {
+                        // Always ensure user document exists in Firestore
                         const userDoc = await getFirestore().collection('users').doc(user.uid).get();
+                        const userData = {
+                            uid: user.uid,
+                            email: user.email,
+                        };
                         if (userDoc.exists) {
-                            setCurrentUser({ uid: user.uid, ...userDoc.data() });
-                            setScreen("dashboard");
-                        } else {
+                            // Update last login but keep existing data
                             await getFirestore().collection('users').doc(user.uid).set({
-                                uid: user.uid,
-                                fullName: user.email?.split('@')[0] || "User",
-                                email: user.email,
+                                ...userData,
+                                lastLogin: getFirestoreModule().FieldValue.serverTimestamp(),
+                            }, { merge: true });
+                            setCurrentUser({ uid: user.uid, ...userDoc.data() });
+                        } else {
+                            // Create new user document
+                            const newUserData = {
+                                ...userData,
+                                fullName: user.displayName || user.email?.split('@')[0] || "User",
                                 bio: "New member",
                                 createdAt: getFirestoreModule().FieldValue.serverTimestamp(),
-                            });
-                            setCurrentUser({ uid: user.uid, fullName: user.email?.split('@')[0], email: user.email });
-                            setScreen("dashboard");
+                                lastLogin: getFirestoreModule().FieldValue.serverTimestamp(),
+                            };
+                            await getFirestore().collection('users').doc(user.uid).set(newUserData);
+                            setCurrentUser({ uid: user.uid, ...newUserData });
                         }
+                        setScreen("dashboard");
                     } else {
                         setCurrentUser(null);
                         if (screen !== "welcome" && screen !== "register") {
@@ -322,6 +333,28 @@ export default function App() {
         if (!currentUser) return;
         setUsersLoading(true);
         setUsersError(null);
+
+        // Use get() first for immediate results, then switch to onSnapshot for real-time
+        const fetchUsers = async () => {
+            try {
+                const snapshot = await getFirestore().collection('users').get();
+                const users = [];
+                snapshot.forEach(doc => {
+                    if (doc.id !== currentUser.uid) {
+                        users.push({ id: doc.id, ...doc.data() });
+                    }
+                });
+                setAllUsers(users);
+                setUsersLoading(false);
+            } catch (error) {
+                console.error('Error fetching users (get):', error);
+                setUsersLoading(false);
+                setUsersError(error.message || 'Failed to load users');
+            }
+        };
+        fetchUsers();
+
+        // Then listen for real-time updates
         const unsubscribe = getFirestore()
             .collection('users')
             .onSnapshot((snapshot) => {
@@ -335,7 +368,7 @@ export default function App() {
                 setUsersLoading(false);
                 setUsersError(null);
             }, (error) => {
-                console.error('Error fetching users:', error);
+                console.error('Error fetching users (listener):', error);
                 setUsersLoading(false);
                 setUsersError(error.message || 'Failed to load users');
                 Alert.alert('Error', 'Failed to load users: ' + (error.message || 'Unknown error'));

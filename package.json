@@ -22,5 +22,8 @@
     "react-native": "0.81.5",
     "react-native-webrtc": "^124.0.7"
   },
-  "private": true
+  "private": true,
+  "devDependencies": {
+    "firebase-admin": "^13.8.0"
+  }
 }

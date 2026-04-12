@@ -1,0 +1,26 @@
+[debug] [2026-04-12T15:26:58.728Z] ----------------------------------------------------------------------
+[debug] [2026-04-12T15:26:58.735Z] Command:       C:\Program Files\nodejs\node.exe C:\Users\dell\AppData\Roaming\npm\node_modules\firebase-tools\lib\bin\firebase.js --project chatconnect-2c26f login:ci --no-localhost
+[debug] [2026-04-12T15:26:58.735Z] CLI Version:   15.14.0
+[debug] [2026-04-12T15:26:58.736Z] Platform:      win32
+[debug] [2026-04-12T15:26:58.736Z] Node Version:  v24.13.0
+[debug] [2026-04-12T15:26:58.736Z] Time:          Sun Apr 12 2026 17:26:58 GMT+0200 (Central European Summer Time)
+[debug] [2026-04-12T15:26:58.736Z] ----------------------------------------------------------------------
+[debug] 
+[warn] !  Authenticating with a `login:ci` token is deprecated and will be removed in a future major version of `firebase-tools`. Instead, use a service account key with `GOOGLE_APPLICATION_CREDENTIALS`: https://cloud.google.com/docs/authentication/getting-started 
+[debug] [2026-04-12T15:26:58.973Z] >>> [apiv2][query] POST https://auth.firebase.tools/attest [none]
+[debug] [2026-04-12T15:26:58.973Z] >>> [apiv2][body] POST https://auth.firebase.tools/attest {"session_id":"8bf0c4b2-824d-4278-beac-a6334a6bada9"}
+[debug] [2026-04-12T15:26:59.518Z] <<< [apiv2][status] POST https://auth.firebase.tools/attest 200
+[debug] [2026-04-12T15:26:59.519Z] <<< [apiv2][body] POST https://auth.firebase.tools/attest {"token":"ARsZcMeGrki-2wiPdZumB0HoAVM0pWqsLUI7KsOJRug"}
+[info] 
+[info] To sign in to the Firebase CLI:
+[info] 
+[info] 1. Take note of your session ID:
+[info] 
+[info]    8BF0C
+[info] 
+[info] 2. Visit the URL below on any device and follow the instructions to get your code:
+[info] 
+[info]    https://auth.firebase.tools/login?code_challenge=mLM-00hitvuoj2GFVIFUvJR3U2qZhOxkExgMzGX2c1U&session=8bf0c4b2-824d-4278-beac-a6334a6bada9&attest=ARsZcMeGrki-2wiPdZumB0HoAVM0pWqsLUI7KsOJRug
+[info] 
+[info] 3. Paste or enter the authorization code below once you have it:
+[info] 
