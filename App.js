@@ -82,7 +82,6 @@ export default function App() {
     // Register State
     const [regFullName, setRegFullName] = useState("");
     const [regEmail, setRegEmail] = useState("");
-    const [regPhone, setRegPhone] = useState("");
     const [regPassword, setRegPassword] = useState("");
     const [regConfirmPassword, setRegConfirmPassword] = useState("");
     const [agreeTerms, setAgreeTerms] = useState(false);
@@ -172,6 +171,10 @@ export default function App() {
             unsubscribe = getAuth().onAuthStateChanged(async (user) => {
                 try {
                     if (user) {
+                        if (!user.emailVerified) {
+                            setIsLoading(false);
+                            return;
+                        }
                         const userDoc = await getFirestore().collection('users').doc(user.uid).get();
                         if (userDoc.exists) {
                             setCurrentUser({ uid: user.uid, ...userDoc.data() });
@@ -286,7 +289,16 @@ export default function App() {
         }
         setLoginLoading(true);
         try {
-            await getAuth().signInWithEmailAndPassword(loginEmail, loginPassword);
+            const userCredential = await getAuth().signInWithEmailAndPassword(loginEmail, loginPassword);
+            if (!userCredential.user.emailVerified) {
+                await userCredential.user.sendEmailVerification();
+                await getAuth().signOut();
+                Alert.alert(
+                    "Email Not Verified",
+                    "Please verify your email first. A new verification link has been sent to your inbox."
+                );
+                return;
+            }
             Alert.alert("Welcome", "Logged in successfully!");
         } catch (error) {
             Alert.alert("Error", error.message);
@@ -316,17 +328,22 @@ export default function App() {
         setLoginLoading(true);
         try {
             const userCredential = await getAuth().createUserWithEmailAndPassword(regEmail, regPassword);
+            await userCredential.user.sendEmailVerification();
             await getFirestore().collection('users').doc(userCredential.user.uid).set({
                 uid: userCredential.user.uid,
                 fullName: regFullName,
                 email: regEmail,
-                phone: regPhone || "",
                 bio: "New member",
                 createdAt: getFirestoreModule().FieldValue.serverTimestamp(),
             });
-            Alert.alert("Success", "Account created! You are now logged in.");
-            setRegFullName(""); setRegEmail(""); setRegPhone("");
+            await getAuth().signOut();
+            Alert.alert(
+                "Verify Your Email",
+                "A verification link has been sent to " + regEmail + ". Please check your inbox (and spam folder) and verify your email before logging in."
+            );
+            setRegFullName(""); setRegEmail("");
             setRegPassword(""); setRegConfirmPassword(""); setAgreeTerms(false);
+            setScreen("welcome");
         } catch (error) {
             Alert.alert("Error", error.message);
         } finally {
@@ -573,8 +590,7 @@ export default function App() {
                         <View style={styles.registerContainer}>
                             <Text style={styles.title}>Create Account</Text>
                             <TextInput style={styles.input} placeholder="Full Name *" value={regFullName} onChangeText={setRegFullName} />
-                            <TextInput style={styles.input} placeholder="Email *" value={regEmail} onChangeText={setRegEmail} keyboardType="email-address" autoCapitalize="none" />
-                            <TextInput style={styles.input} placeholder="Phone (optional)" value={regPhone} onChangeText={setRegPhone} keyboardType="phone-pad" />
+                            <TextInput style={styles.input} placeholder="Email (Gmail) *" value={regEmail} onChangeText={setRegEmail} keyboardType="email-address" autoCapitalize="none" />
                             <TextInput style={styles.input} placeholder="Password * (min 6)" secureTextEntry value={regPassword} onChangeText={setRegPassword} />
                             <TextInput style={styles.input} placeholder="Confirm Password *" secureTextEntry value={regConfirmPassword} onChangeText={setRegConfirmPassword} />
                             <View style={styles.checkboxRow}>
