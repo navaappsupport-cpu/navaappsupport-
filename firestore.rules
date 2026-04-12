@@ -2,54 +2,264 @@ rules_version = '2';
 
 service cloud.firestore {
   match /databases/{database}/documents {
-    // Users can read/write their own user document
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function userEmail() {
+      return request.auth.token.email;
+    }
+
+    function isOwnUser(userId) {
+      return signedIn() && request.auth.uid == userId;
+    }
+
+    function friendDocId(userId, friendId) {
+      return userId + '_' + friendId;
+    }
+
+    function friendRequestDocId(fromUserId, toUserId) {
+      return fromUserId + '_' + toUserId;
+    }
+
+    function blockDocId(blockedBy, blockedUser) {
+      return blockedBy + '_' + blockedUser;
+    }
+
+    function areFriends(userA, userB) {
+      return exists(/databases/$(database)/documents/friends/$(friendDocId(userA, userB))) &&
+        exists(/databases/$(database)/documents/friends/$(friendDocId(userB, userA)));
+    }
+
+    function hasIncomingFriendRequest(userId, friendId) {
+      return exists(/databases/$(database)/documents/friendRequests/$(friendRequestDocId(friendId, userId)));
+    }
+
+    function hasFriendLink(linkId, userId, friendId) {
+      return linkId is string
+        && exists(/databases/$(database)/documents/friends/$(linkId))
+        && get(/databases/$(database)/documents/friends/$(linkId)).data.userId == userId
+        && get(/databases/$(database)/documents/friends/$(linkId)).data.friendId == friendId;
+    }
+
+    function isBlocked(userA, userB) {
+      return exists(/databases/$(database)/documents/blocks/$(blockDocId(userA, userB))) ||
+        exists(/databases/$(database)/documents/blocks/$(blockDocId(userB, userA)));
+    }
+
+    function validName(value) {
+      return value is string && value.size() > 0 && value.size() <= 80;
+    }
+
+    function validOptionalString(value, maxSize) {
+      return !(value is string) || value.size() <= maxSize;
+    }
+
+    function validChatTheme(value) {
+      return !('theme' in request.resource.data) || value in ['default', 'forest', 'sunset'];
+    }
+
+    function messageParticipantsAreValid(data) {
+      return data.senderId is string &&
+        data.receiverId is string &&
+        data.senderId != data.receiverId &&
+        (request.auth.uid == data.senderId || request.auth.uid == data.receiverId);
+    }
+
+    function isMessageParticipant(data) {
+      return signedIn() && (request.auth.uid == data.senderId || request.auth.uid == data.receiverId);
+    }
+
+    function sameMessageParties() {
+      return request.resource.data.senderId == resource.data.senderId &&
+        request.resource.data.receiverId == resource.data.receiverId &&
+        request.resource.data.senderName == resource.data.senderName &&
+        (!('friendLinkId' in resource.data) || request.resource.data.friendLinkId == resource.data.friendLinkId) &&
+        request.resource.data.timestamp == resource.data.timestamp;
+    }
+
+    function validMessageText(value) {
+      return value is string && value.size() > 0 && value.size() <= 2000;
+    }
+
+    function callParticipantsFromParent(callId) {
+      return get(/databases/$(database)/documents/calls/$(callId)).data;
+    }
+
     match /users/{userId} {
-      allow read: if request.auth != null;
-      allow create: if request.auth != null;
-      allow update, delete: if request.auth != null && request.auth.uid == userId;
+      allow read: if signedIn();
+      allow create: if isOwnUser(userId)
+        && request.resource.data.keys().hasOnly(['uid', 'email', 'fullName', 'bio', 'photoUri', 'createdAt', 'lastLogin'])
+        && request.resource.data.uid == request.auth.uid
+        && request.resource.data.email == userEmail()
+        && validName(request.resource.data.fullName)
+        && (!('bio' in request.resource.data) || validOptionalString(request.resource.data.bio, 160))
+        && (!('photoUri' in request.resource.data) || validOptionalString(request.resource.data.photoUri, 900000));
+      allow update: if isOwnUser(userId)
+        && request.resource.data.keys().hasOnly(['uid', 'email', 'fullName', 'bio', 'photoUri', 'createdAt', 'lastLogin'])
+        && request.resource.data.uid == resource.data.uid
+        && request.resource.data.uid == request.auth.uid
+        && request.resource.data.email == resource.data.email
+        && request.resource.data.email == userEmail()
+        && validName(request.resource.data.fullName)
+        && (!('bio' in request.resource.data) || validOptionalString(request.resource.data.bio, 160))
+        && (!('photoUri' in request.resource.data) || validOptionalString(request.resource.data.photoUri, 900000));
+      allow delete: if isOwnUser(userId);
     }
 
-    // Messages: authenticated users can read/write in conversations they're part of
-    match /messages/{chatId}/{document=**} {
-      allow read, write: if request.auth != null;
+    match /messages/{chatId} {
+      allow read, write: if false;
     }
 
-    // Friend requests: authenticated users can read/write
     match /friendRequests/{docId} {
-      allow read, write: if request.auth != null;
+      allow create: if signedIn()
+        && request.resource.data.keys().hasOnly(['from', 'fromName', 'to', 'toName', 'status', 'timestamp'])
+        && request.resource.data.from == request.auth.uid
+        && request.resource.data.to is string
+        && request.resource.data.to != request.auth.uid
+        && request.resource.data.status == 'pending'
+        && validName(request.resource.data.fromName)
+        && validName(request.resource.data.toName)
+        && docId == friendRequestDocId(request.resource.data.from, request.resource.data.to)
+        && !isBlocked(request.resource.data.from, request.resource.data.to);
+      allow read: if signedIn() && (resource.data.from == request.auth.uid || resource.data.to == request.auth.uid);
+      allow update: if false;
+      allow delete: if signedIn() && (resource.data.from == request.auth.uid || resource.data.to == request.auth.uid);
     }
 
-    // Friends: authenticated users can read/write
     match /friends/{docId} {
-      allow read, write: if request.auth != null;
+      allow create: if signedIn()
+        && request.resource.data.keys().hasOnly(['userId', 'friendId', 'friendName', 'addedAt'])
+        && request.resource.data.userId is string
+        && request.resource.data.friendId is string
+        && request.resource.data.userId != request.resource.data.friendId
+        && validName(request.resource.data.friendName)
+        && docId == friendDocId(request.resource.data.userId, request.resource.data.friendId)
+        && (request.auth.uid == request.resource.data.userId || request.auth.uid == request.resource.data.friendId)
+        && !isBlocked(request.resource.data.userId, request.resource.data.friendId)
+        && hasIncomingFriendRequest(request.resource.data.userId, request.resource.data.friendId);
+      allow read: if signedIn() && (resource.data.userId == request.auth.uid || resource.data.friendId == request.auth.uid);
+      allow update: if false;
+      allow delete: if signedIn() && (resource.data.userId == request.auth.uid || resource.data.friendId == request.auth.uid);
     }
 
-    // Blocks: authenticated users can create/read their own blocks
     match /blocks/{docId} {
-      allow create: if request.auth != null;
-      allow read: if request.auth != null && resource.data.blockedBy == request.auth.uid;
-      allow update, delete: if request.auth != null && resource.data.blockedBy == request.auth.uid;
+      allow create: if signedIn()
+        && request.resource.data.keys().hasOnly(['blockedBy', 'blockedUser', 'blockedName', 'timestamp'])
+        && request.resource.data.blockedBy == request.auth.uid
+        && request.resource.data.blockedUser is string
+        && request.resource.data.blockedUser != request.auth.uid
+        && validName(request.resource.data.blockedName)
+        && docId == blockDocId(request.resource.data.blockedBy, request.resource.data.blockedUser);
+      allow read: if signedIn() && (resource.data.blockedBy == request.auth.uid || resource.data.blockedUser == request.auth.uid);
+      allow update, delete: if signedIn() && resource.data.blockedBy == request.auth.uid;
     }
 
-    // Reports: authenticated users can create and read their own reports
     match /reports/{docId} {
-      allow create: if request.auth != null;
-      allow read: if request.auth != null && resource.data.reportedBy == request.auth.uid;
+      allow create: if signedIn()
+        && request.resource.data.keys().hasOnly(['reportedBy', 'reportedUser', 'reportedName', 'reason', 'timestamp'])
+        && request.resource.data.reportedBy == request.auth.uid
+        && request.resource.data.reportedUser is string
+        && request.resource.data.reportedUser != request.auth.uid
+        && validName(request.resource.data.reportedName)
+        && request.resource.data.reason is string
+        && request.resource.data.reason.size() > 0
+        && request.resource.data.reason.size() <= 300;
+      allow read: if signedIn() && resource.data.reportedBy == request.auth.uid;
       allow update, delete: if false;
     }
 
-    // Chat settings: users can manage only their own settings documents
     match /chatSettings/{docId} {
-      allow create: if request.auth != null && request.resource.data.userId == request.auth.uid;
-      allow read, update, delete: if request.auth != null && resource.data.userId == request.auth.uid;
+      allow create: if signedIn()
+        && request.resource.data.keys().hasOnly(['userId', 'friendId', 'friendLinkId', 'muted', 'updatedAt', 'disappearingHours', 'theme', 'shortcutAdded'])
+        && request.resource.data.userId == request.auth.uid
+        && request.resource.data.friendId is string
+        && request.resource.data.friendId != request.auth.uid
+        && docId == friendDocId(request.resource.data.userId, request.resource.data.friendId)
+        && (areFriends(request.resource.data.userId, request.resource.data.friendId) || hasFriendLink(request.resource.data.friendLinkId, request.resource.data.userId, request.resource.data.friendId))
+        && !isBlocked(request.resource.data.userId, request.resource.data.friendId)
+        && (!('muted' in request.resource.data) || request.resource.data.muted is bool)
+        && (!('shortcutAdded' in request.resource.data) || request.resource.data.shortcutAdded is bool)
+        && (!('disappearingHours' in request.resource.data) || request.resource.data.disappearingHours in [0, 24])
+        && validChatTheme(request.resource.data.theme);
+      allow read, update, delete: if signedIn()
+        && resource.data.userId == request.auth.uid
+        && (!('userId' in request.resource.data) || request.resource.data.userId == request.auth.uid)
+        && (!('friendId' in request.resource.data) || request.resource.data.friendId == resource.data.friendId)
+        && (!('friendLinkId' in request.resource.data) || hasFriendLink(request.resource.data.friendLinkId, request.auth.uid, resource.data.friendId))
+        && (!('muted' in request.resource.data) || request.resource.data.muted is bool)
+        && (!('shortcutAdded' in request.resource.data) || request.resource.data.shortcutAdded is bool)
+        && (!('disappearingHours' in request.resource.data) || request.resource.data.disappearingHours in [0, 24])
+        && (!('theme' in request.resource.data) || request.resource.data.theme in ['default', 'forest', 'sunset']);
     }
 
-    // Calls: authenticated users can read/write calls and ICE candidates
     match /calls/{docId} {
-      allow read, write: if request.auth != null;
+      allow create: if signedIn()
+        && request.resource.data.keys().hasOnly(['from', 'fromName', 'to', 'toName', 'callerFriendLinkId', 'status', 'timestamp'])
+        && request.resource.data.from == request.auth.uid
+        && request.resource.data.to is string
+        && request.resource.data.to != request.auth.uid
+        && validName(request.resource.data.fromName)
+        && validName(request.resource.data.toName)
+        && request.resource.data.status == 'ringing'
+        && (areFriends(request.resource.data.from, request.resource.data.to) || hasFriendLink(request.resource.data.callerFriendLinkId, request.resource.data.from, request.resource.data.to))
+        && !isBlocked(request.resource.data.from, request.resource.data.to);
+      allow read: if signedIn() && (resource.data.from == request.auth.uid || resource.data.to == request.auth.uid);
+      allow update: if signedIn()
+        && (resource.data.from == request.auth.uid || resource.data.to == request.auth.uid)
+        && request.resource.data.from == resource.data.from
+        && request.resource.data.to == resource.data.to
+        && request.resource.data.fromName == resource.data.fromName
+        && request.resource.data.toName == resource.data.toName
+        && request.resource.data.callerFriendLinkId == resource.data.callerFriendLinkId
+        && request.resource.data.timestamp == resource.data.timestamp
+        && request.resource.data.keys().hasOnly(['from', 'fromName', 'to', 'toName', 'callerFriendLinkId', 'status', 'timestamp', 'offer', 'answer'])
+        && request.resource.data.status in ['ringing', 'active', 'ended'];
+      allow delete: if false;
     }
+
     match /calls/{docId}/{subcol}/{candidateId} {
-      allow read, write: if request.auth != null;
+      allow read, write: if signedIn()
+        && subcol in ['callerCandidates', 'calleeCandidates']
+        && (callParticipantsFromParent(docId).from == request.auth.uid || callParticipantsFromParent(docId).to == request.auth.uid);
+    }
+
+    match /messages/{chatId}/chats/{messageId} {
+      allow create: if signedIn()
+        && request.resource.data.keys().hasOnly(['text', 'senderId', 'senderName', 'receiverId', 'friendLinkId', 'timestamp', 'read', 'expiresAt'])
+        && request.resource.data.senderId == request.auth.uid
+        && request.resource.data.senderName is string
+        && request.resource.data.senderName.size() > 0
+        && request.resource.data.senderName.size() <= 80
+        && request.resource.data.read == false
+        && messageParticipantsAreValid(request.resource.data)
+        && (areFriends(request.resource.data.senderId, request.resource.data.receiverId) || hasFriendLink(request.resource.data.friendLinkId, request.resource.data.senderId, request.resource.data.receiverId))
+        && !isBlocked(request.resource.data.senderId, request.resource.data.receiverId)
+        && validMessageText(request.resource.data.text)
+        && (!('expiresAt' in request.resource.data) || request.resource.data.expiresAt > request.time);
+      allow read: if signedIn() && request.auth.uid in chatId.split('_');
+      allow update: if signedIn()
+        && isMessageParticipant(resource.data)
+        && sameMessageParties()
+        && (
+          (
+            request.auth.uid == resource.data.senderId
+            && request.resource.data.read == resource.data.read
+            && validMessageText(request.resource.data.text)
+            && request.resource.data.keys().hasOnly(['text', 'senderId', 'senderName', 'receiverId', 'friendLinkId', 'timestamp', 'read', 'expiresAt', 'editedAt'])
+            && (!('editedAt' in request.resource.data) || request.resource.data.editedAt > resource.data.timestamp)
+            && (!('expiresAt' in request.resource.data) || request.resource.data.expiresAt == resource.data.expiresAt)
+          ) ||
+          (
+            request.auth.uid == resource.data.receiverId
+            && request.resource.data.text == resource.data.text
+            && request.resource.data.read == true
+            && request.resource.data.keys().hasOnly(['text', 'senderId', 'senderName', 'receiverId', 'friendLinkId', 'timestamp', 'read', 'expiresAt', 'editedAt'])
+            && (!('editedAt' in resource.data) || request.resource.data.editedAt == resource.data.editedAt)
+            && (!('expiresAt' in request.resource.data) || request.resource.data.expiresAt == resource.data.expiresAt)
+          )
+        );
+      allow delete: if signedIn() && isMessageParticipant(resource.data);
     }
   }
 }

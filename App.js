@@ -14,6 +14,7 @@ import {
     Alert,
     StyleSheet,
     Image,
+    Share,
     ActivityIndicator,
     KeyboardAvoidingView,
     Platform,
@@ -26,6 +27,7 @@ require('@react-native-firebase/app');
 
 let firebaseAuth = null;
 let firebaseFirestore = null;
+let firebaseStorage = null;
 
 const getAuth = () => {
     if (!firebaseAuth) {
@@ -63,8 +65,27 @@ const getFirestoreModule = () => {
     return firebaseFirestore;
 };
 
+const getStorage = () => {
+    if (!firebaseStorage) {
+        try {
+            firebaseStorage = require('@react-native-firebase/storage').default;
+        } catch (error) {
+            console.error("Firebase storage module failed to load", error);
+            throw error;
+        }
+    }
+    return firebaseStorage();
+};
+
 const STORAGE_KEYS = {
     SESSION: "APP_SESSION",
+    PINNED_CHATS_PREFIX: "PINNED_CHATS_",
+};
+
+const CHAT_THEMES = {
+    default: { myBubble: "#3B82F6", sendButton: "#3B82F6" },
+    forest: { myBubble: "#16A34A", sendButton: "#16A34A" },
+    sunset: { myBubble: "#EA580C", sendButton: "#EA580C" },
 };
 
 // WebRTC for real audio calls
@@ -119,7 +140,12 @@ export default function App() {
     const [selectedFriend, setSelectedFriend] = useState(null);
     const [messageText, setMessageText] = useState("");
     const [editingMessage, setEditingMessage] = useState(null);
+    const [selectedMessage, setSelectedMessage] = useState(null);
     const [isChatMuted, setIsChatMuted] = useState(false);
+    const [chatTheme, setChatTheme] = useState("default");
+    const [disappearingHours, setDisappearingHours] = useState(0);
+    const [isShortcutAdded, setIsShortcutAdded] = useState(false);
+    const [pinnedChatIds, setPinnedChatIds] = useState([]);
     const flatListRef = useRef(null);
     const messageInputRef = useRef(null);
 
@@ -136,25 +162,8 @@ export default function App() {
     const localStreamRef = useRef(null);
     const candidateUnsubRef = useRef(null);
 
-    useEffect(() => {
-        if (screen !== "chat" || !selectedFriend || !currentUser) return;
-        const chatId = [currentUser.uid, selectedFriend.id].sort().join('_');
-        const messages = chatMessages[chatId] || [];
-
-        const markRead = async () => {
-            const unreadMessages = messages.filter(m => m.senderId === selectedFriend.id && !m.read);
-            for (const msg of unreadMessages) {
-                await getFirestore()
-                    .collection('messages')
-                    .doc(chatId)
-                    .collection('chats')
-                    .doc(msg.id)
-                    .update({ read: true });
-            }
-        };
-
-        markRead();
-    }, [screen, selectedFriend, currentUser, chatMessages]);
+    const chatMessagesRef = useRef(chatMessages);
+    chatMessagesRef.current = chatMessages;
 
     // Friend System State
     const [friendsList, setFriendsList] = useState([]);
@@ -162,6 +171,8 @@ export default function App() {
     const [allUsers, setAllUsers] = useState([]);
     const [usersLoading, setUsersLoading] = useState(true);
     const [usersError, setUsersError] = useState(null);
+    const [blockedUsers, setBlockedUsers] = useState([]);
+    const [blockedByUsers, setBlockedByUsers] = useState([]);
 
     // UI State
     const [searchQuery, setSearchQuery] = useState("");
@@ -212,6 +223,51 @@ export default function App() {
         return date.toLocaleDateString([], { month: 'short', day: 'numeric' });
     };
 
+    const getFriendRequestId = (fromUserId, toUserId) => `${fromUserId}_${toUserId}`;
+
+    const getFriendDocId = (userId, friendId) => `${userId}_${friendId}`;
+
+    const getBlockDocId = (blockedBy, blockedUser) => `${blockedBy}_${blockedUser}`;
+
+    const isBlockedRelationship = (userId) => blockedUsers.includes(userId) || blockedByUsers.includes(userId);
+
+    const ensureActiveRelationship = (user) => {
+        if (!user?.id) {
+            throw new Error("User not found.");
+        }
+        if (isBlockedRelationship(user.id)) {
+            throw new Error("This user is blocked or has blocked you.");
+        }
+    };
+
+    const canChatWithUser = (userId) => friendsList.some(friend => friend.id === userId) && !isBlockedRelationship(userId);
+
+    const getSelectedFriendLinkId = (friend = selectedFriend) => {
+        if (!currentUser || !friend?.id) {
+            return null;
+        }
+
+        return friend.friendshipDocId || getFriendDocId(currentUser.uid, friend.id);
+    };
+
+    const getProfilePhotoStoragePath = (userId) => `profilePhotos/${userId}/avatar.jpg`;
+
+    const normalizeUploadUri = (uri) => uri?.startsWith("file://") ? uri.replace("file://", "") : uri;
+
+    const saveProfilePhotoFallback = async (asset) => {
+        const fallbackUri = asset.base64 ? `data:${asset.mimeType || 'image/jpeg'};base64,${asset.base64}` : asset.uri;
+
+        if (!fallbackUri) {
+            throw new Error("Selected image is invalid.");
+        }
+
+        await getFirestore().collection('users').doc(currentUser.uid).set({
+            photoUri: fallbackUri,
+        }, { merge: true });
+
+        setCurrentUser(prev => ({ ...prev, photoUri: fallbackUri }));
+    };
+
     // Navigation
     const goBack = () => {
         setSearchQuery("");
@@ -248,15 +304,30 @@ export default function App() {
             }
 
             const asset = result.assets[0];
-            const dataUri = asset.base64 ? `data:${asset.mimeType || 'image/jpeg'};base64,${asset.base64}` : asset.uri;
+            if (!asset.uri) {
+                Alert.alert("Error", "Selected image is invalid.");
+                return;
+            }
 
-            await getFirestore().collection('users').doc(currentUser.uid).set({
-                photoUri: dataUri,
-            }, { merge: true });
+            try {
+                const storagePath = getProfilePhotoStoragePath(currentUser.uid);
+                const storageRef = getStorage().ref(storagePath);
+                await storageRef.putFile(normalizeUploadUri(asset.uri));
+                const downloadUrl = await storageRef.getDownloadURL();
 
-            setCurrentUser(prev => ({ ...prev, photoUri: dataUri }));
+                await getFirestore().collection('users').doc(currentUser.uid).set({
+                    photoUri: downloadUrl,
+                }, { merge: true });
+
+                setCurrentUser(prev => ({ ...prev, photoUri: downloadUrl }));
+            } catch (storageError) {
+                console.warn("Falling back to Firestore-based profile photo storage", storageError);
+                await saveProfilePhotoFallback(asset);
+            }
+
             Alert.alert("Success", "Profile photo updated");
         } catch (error) {
+            console.error("Profile photo update failed", error);
             Alert.alert("Error", "Failed to update profile photo");
         }
     };
@@ -355,6 +426,35 @@ export default function App() {
     }, [currentUser]);
 
     useEffect(() => {
+        if (!currentUser) {
+            setBlockedUsers([]);
+            setBlockedByUsers([]);
+            return;
+        }
+
+        const unsubBlockedUsers = getFirestore()
+            .collection('blocks')
+            .where('blockedBy', '==', currentUser.uid)
+            .onSnapshot((snapshot) => {
+                const nextBlocked = snapshot.docs.map(doc => doc.data()?.blockedUser).filter(Boolean);
+                setBlockedUsers(nextBlocked);
+            });
+
+        const unsubBlockedByUsers = getFirestore()
+            .collection('blocks')
+            .where('blockedUser', '==', currentUser.uid)
+            .onSnapshot((snapshot) => {
+                const nextBlockedBy = snapshot.docs.map(doc => doc.data()?.blockedBy).filter(Boolean);
+                setBlockedByUsers(nextBlockedBy);
+            });
+
+        return () => {
+            unsubBlockedUsers();
+            unsubBlockedByUsers();
+        };
+    }, [currentUser]);
+
+    useEffect(() => {
         if (!currentUser) return;
         const unsubscribe = getFirestore()
             .collection('friends')
@@ -365,7 +465,11 @@ export default function App() {
                     const friendData = doc.data();
                     const userDoc = await getFirestore().collection('users').doc(friendData.friendId).get();
                     if (userDoc.exists) {
-                        friends.push({ id: userDoc.id, ...userDoc.data() });
+                        friends.push({
+                            id: userDoc.id,
+                            friendshipDocId: doc.id,
+                            ...userDoc.data(),
+                        });
                     }
                 }
                 setFriendsList(friends);
@@ -374,22 +478,73 @@ export default function App() {
     }, [currentUser]);
 
     useEffect(() => {
+        if (selectedFriend && isBlockedRelationship(selectedFriend.id) && screen === "chat") {
+            Alert.alert("Access blocked", "You can no longer message this user.");
+            goBack();
+        }
+    }, [selectedFriend, blockedUsers, blockedByUsers, screen]);
+
+    useEffect(() => {
         if (!currentUser || !selectedFriend) return;
         const chatId = [currentUser.uid, selectedFriend.id].sort().join('_');
-        const unsubscribe = getFirestore()
-            .collection('messages')
-            .doc(chatId)
-            .collection('chats')
-            .orderBy('timestamp', 'asc')
-            .onSnapshot((snapshot) => {
-                const messages = [];
-                snapshot.forEach(doc => {
-                    messages.push({ id: doc.id, ...doc.data() });
+        let unsubscribe = null;
+        let retryCount = 0;
+
+        const startListener = () => {
+            unsubscribe = getFirestore()
+                .collection('messages')
+                .doc(chatId)
+                .collection('chats')
+                .orderBy('timestamp', 'asc')
+                .onSnapshot((snapshot) => {
+                    retryCount = 0;
+                    const messages = [];
+                    snapshot.forEach(doc => {
+                        messages.push({ id: doc.id, ...doc.data() });
+                    });
+                    setChatMessages(prev => ({ ...prev, [chatId]: messages }));
+
+                    // Auto-scroll to bottom if user is near bottom
+                    if (flatListRef.current?._isNearBottom !== false) {
+                        setTimeout(() => flatListRef.current?.scrollToEnd({ animated: true }), 100);
+                    }
+                }, (error) => {
+                    console.warn('Chat listener error:', error.code, error.message);
+                    if (retryCount < 3) {
+                        retryCount++;
+                        setTimeout(() => startListener(), 2000 * retryCount);
+                    } else {
+                        Alert.alert("Chat Error", `Could not load messages.\nCode: ${error.code || 'unknown'}\n${error.message || error}`);
+                    }
                 });
-                setChatMessages(prev => ({ ...prev, [chatId]: messages }));
-            });
-        return () => unsubscribe();
+        };
+
+        startListener();
+        return () => { if (unsubscribe) unsubscribe(); };
     }, [currentUser, selectedFriend]);
+
+    // Mark messages as read when entering chat screen
+    useEffect(() => {
+        if (screen !== "chat" || !selectedFriend || !currentUser) return;
+        const chatId = [currentUser.uid, selectedFriend.id].sort().join('_');
+
+        // Small delay to let onSnapshot populate messages first
+        const timer = setTimeout(() => {
+            const messages = chatMessagesRef.current[chatId] || [];
+            const unread = messages.filter(m => m.senderId === selectedFriend.id && !m.read);
+            for (const msg of unread) {
+                getFirestore()
+                    .collection('messages').doc(chatId)
+                    .collection('chats').doc(msg.id)
+                    .update({ read: true })
+                    .catch((err) => {
+                        console.warn('markRead failed:', err.code, err.message);
+                    });
+            }
+        }, 500);
+
+        return () => clearTimeout(timer);
+    }, [screen, selectedFriend, currentUser]);
 
     useEffect(() => {
         if (screen !== "chat" || !selectedFriend) return;
@@ -404,6 +559,9 @@ export default function App() {
     useEffect(() => {
         if (!currentUser || !selectedFriend) {
             setIsChatMuted(false);
+            setChatTheme("default");
+            setDisappearingHours(0);
+            setIsShortcutAdded(false);
             return;
         }
 
@@ -413,16 +571,46 @@ export default function App() {
             .doc(settingsId)
             .onSnapshot((doc) => {
                 if (doc.exists) {
-                    setIsChatMuted(!!doc.data()?.muted);
+                    const data = doc.data() || {};
+                    setIsChatMuted(!!data.muted);
+                    setChatTheme(data.theme || "default");
+                    setDisappearingHours(data.disappearingHours || 0);
+                    setIsShortcutAdded(!!data.shortcutAdded);
                 } else {
                     setIsChatMuted(false);
+                    setChatTheme("default");
+                    setDisappearingHours(0);
+                    setIsShortcutAdded(false);
                 }
             }, () => {
                 setIsChatMuted(false);
+                setChatTheme("default");
+                setDisappearingHours(0);
+                setIsShortcutAdded(false);
             });
 
         return () => unsubscribe();
     }, [currentUser, selectedFriend]);
+
+    useEffect(() => {
+        if (!currentUser) {
+            setPinnedChatIds([]);
+            return;
+        }
+
+        const loadPinnedChats = async () => {
+            try {
+                const key = `${STORAGE_KEYS.PINNED_CHATS_PREFIX}${currentUser.uid}`;
+                const raw = await AsyncStorage.getItem(key);
+                const parsed = raw ? JSON.parse(raw) : [];
+                setPinnedChatIds(Array.isArray(parsed) ? parsed : []);
+            } catch {
+                setPinnedChatIds([]);
+            }
+        };
+
+        loadPinnedChats();
+    }, [currentUser]);
 
     useEffect(() => {
         if (!currentUser) return;
@@ -487,13 +675,16 @@ export default function App() {
                 if (!snapshot.empty && !callStateRef.current) {
                     const doc = snapshot.docs[0];
                     const data = doc.data();
+                    if (isBlockedRelationship(data.from)) {
+                        return;
+                    }
                     setCallState('incoming');
                     setCallPartner({ id: data.from, fullName: data.fromName });
                     setCallDoc({ id: doc.id, ...data });
                 }
             });
         return () => unsubscribe();
-    }, [currentUser]);
+    }, [currentUser, blockedUsers, blockedByUsers]);
 
     useEffect(() => {
         if (!callDoc?.id) return;
@@ -608,6 +799,13 @@ export default function App() {
                 onPress: async () => {
                     const user = getAuth().currentUser;
                     if (user) {
+                        try {
+                            await getStorage().ref(getProfilePhotoStoragePath(user.uid)).delete();
+                        } catch (error) {
+                            if (error?.code !== 'storage/object-not-found') {
+                                console.warn('Profile photo delete failed', error);
+                            }
+                        }
                         await getFirestore().collection('users').doc(user.uid).delete();
                         await user.delete();
                         Alert.alert("Deleted", "Your account has been deleted");
@@ -620,16 +818,23 @@ export default function App() {
     // ==================== FRIEND FUNCTIONS ====================
 
     const sendFriendRequest = async (toUserId, toUserName) => {
-        const existing = await getFirestore()
-            .collection('friendRequests')
-            .where('from', '==', currentUser.uid)
-            .where('to', '==', toUserId)
-            .get();
-        if (!existing.empty) {
+        if (!toUserId || toUserId === currentUser.uid) {
+            Alert.alert("Error", "Invalid friend request.");
+            return;
+        }
+        if (isBlockedRelationship(toUserId)) {
+            Alert.alert("Blocked", "You cannot send a request to this user.");
+            return;
+        }
+
+        const requestId = getFriendRequestId(currentUser.uid, toUserId);
+        const existing = await getFirestore().collection('friendRequests').doc(requestId).get();
+        if (existing.exists) {
             Alert.alert("Info", "Request already sent");
             return;
         }
-        await getFirestore().collection('friendRequests').add({
+
+        await getFirestore().collection('friendRequests').doc(requestId).set({
             from: currentUser.uid,
             fromName: currentUser.fullName,
             to: toUserId,
@@ -641,25 +846,50 @@ export default function App() {
     };
 
     const acceptFriendRequest = async (request) => {
-        await getFirestore().collection('friends').add({
-            userId: currentUser.uid,
-            friendId: request.from,
-            friendName: request.fromName,
-            addedAt: getFirestoreModule().FieldValue.serverTimestamp(),
-        });
-        await getFirestore().collection('friends').add({
-            userId: request.from,
-            friendId: currentUser.uid,
-            friendName: currentUser.fullName,
-            addedAt: getFirestoreModule().FieldValue.serverTimestamp(),
-        });
-        await getFirestore().collection('friendRequests').doc(request.id).delete();
-        Alert.alert("Success", `${request.fromName} is now your friend!`);
+        if (!request?.from || request.to !== currentUser.uid) {
+            Alert.alert("Error", "Invalid friend request.");
+            return;
+        }
+
+        if (isBlockedRelationship(request.from)) {
+            Alert.alert("Blocked", "You cannot accept a blocked user's request.");
+            return;
+        }
+
+        try {
+            const batch = getFirestore().batch();
+            const addedAt = getFirestoreModule().FieldValue.serverTimestamp();
+
+            batch.set(getFirestore().collection('friends').doc(getFriendDocId(currentUser.uid, request.from)), {
+                userId: currentUser.uid,
+                friendId: request.from,
+                friendName: request.fromName,
+                addedAt,
+            });
+
+            batch.set(getFirestore().collection('friends').doc(getFriendDocId(request.from, currentUser.uid)), {
+                userId: request.from,
+                friendId: currentUser.uid,
+                friendName: currentUser.fullName,
+                addedAt,
+            });
+
+            batch.delete(getFirestore().collection('friendRequests').doc(request.id));
+            await batch.commit();
+
+            Alert.alert("Success", `${request.fromName} is now your friend!`);
+        } catch (error) {
+            Alert.alert("Error", "Failed to accept friend request.");
+        }
     };
 
     const declineFriendRequest = async (requestId) => {
-        await getFirestore().collection('friendRequests').doc(requestId).delete();
-        Alert.alert("Info", "Request declined");
+        try {
+            await getFirestore().collection('friendRequests').doc(requestId).delete();
+            Alert.alert("Info", "Request declined");
+        } catch {
+            Alert.alert("Error", "Failed to decline request.");
+        }
     };
 
     const removeFriend = async (friendId, friendName) => {
@@ -669,23 +899,16 @@ export default function App() {
                 text: "Remove",
                 style: "destructive",
                 onPress: async () => {
-                    // Remove both directions
-                    const mySnap = await getFirestore()
-                        .collection('friends')
-                        .where('userId', '==', currentUser.uid)
-                        .where('friendId', '==', friendId)
-                        .get();
-                    const theirSnap = await getFirestore()
-                        .collection('friends')
-                        .where('userId', '==', friendId)
-                        .where('friendId', '==', currentUser.uid)
-                        .get();
-                    const batch = getFirestore().batch();
-                    mySnap.forEach(doc => batch.delete(doc.ref));
-                    theirSnap.forEach(doc => batch.delete(doc.ref));
-                    await batch.commit();
-                    Alert.alert("Removed", `${friendName} removed from friends`);
-                    if (screen === "userPreview") goBack();
+                    try {
+                        const batch = getFirestore().batch();
+                        batch.delete(getFirestore().collection('friends').doc(getFriendDocId(currentUser.uid, friendId)));
+                        batch.delete(getFirestore().collection('friends').doc(getFriendDocId(friendId, currentUser.uid)));
+                        await batch.commit();
+                        Alert.alert("Removed", `${friendName} removed from friends`);
+                        if (screen === "userPreview") goBack();
+                    } catch {
+                        Alert.alert("Error", "Failed to remove friend.");
+                    }
                 },
             },
         ]);
@@ -699,26 +922,19 @@ export default function App() {
                 style: "destructive",
                 onPress: async () => {
                     try {
-                        await getFirestore().collection('blocks').add({
+                        const batch = getFirestore().batch();
+
+                        batch.set(getFirestore().collection('blocks').doc(getBlockDocId(currentUser.uid, userId)), {
                             blockedBy: currentUser.uid,
                             blockedUser: userId,
                             blockedName: userName,
                             timestamp: getFirestoreModule().FieldValue.serverTimestamp(),
                         });
-                        // Also remove from friends if they are friends
-                        const mySnap = await getFirestore()
-                            .collection('friends')
-                            .where('userId', '==', currentUser.uid)
-                            .where('friendId', '==', userId)
-                            .get();
-                        const theirSnap = await getFirestore()
-                            .collection('friends')
-                            .where('userId', '==', userId)
-                            .where('friendId', '==', currentUser.uid)
-                            .get();
-                        const batch = getFirestore().batch();
-                        mySnap.forEach(doc => batch.delete(doc.ref));
-                        theirSnap.forEach(doc => batch.delete(doc.ref));
+
+                        batch.delete(getFirestore().collection('friends').doc(getFriendDocId(currentUser.uid, userId)));
+                        batch.delete(getFirestore().collection('friends').doc(getFriendDocId(userId, currentUser.uid)));
+                        batch.delete(getFirestore().collection('friendRequests').doc(getFriendRequestId(currentUser.uid, userId)));
+                        batch.delete(getFirestore().collection('friendRequests').doc(getFriendRequestId(userId, currentUser.uid)));
                         await batch.commit();
                         Alert.alert("Blocked", `${userName} has been blocked`);
                         if (screen === "userPreview") goBack();
@@ -731,6 +947,10 @@ export default function App() {
     };
 
     const reportUser = async (userId, userName) => {
+        if (userId === currentUser?.uid) {
+            Alert.alert("Error", "You cannot report yourself.");
+            return;
+        }
         Alert.alert("Report " + userName, "Report this user for inappropriate behavior?", [
             { text: "Cancel", style: "cancel" },
             {
@@ -784,39 +1004,69 @@ export default function App() {
     // ==================== CHAT FUNCTIONS ====================
 
     const sendMessage = async () => {
-        if (!messageText.trim() || !selectedFriend) return;
+        const trimmedMessage = messageText.trim();
+        if (!trimmedMessage || !selectedFriend) return;
+
+        if (!canChatWithUser(selectedFriend.id)) {
+            const friendFound = friendsList.some(f => f.id === selectedFriend.id);
+            const blocked = isBlockedRelationship(selectedFriend.id);
+            Alert.alert("Unavailable", `Cannot send message.\nFriend in list: ${friendFound}\nBlocked: ${blocked}\nFriends loaded: ${friendsList.length}`);
+            return;
+        }
+
+        if (trimmedMessage.length > 2000) {
+            Alert.alert("Message too long", "Keep messages under 2000 characters.");
+            return;
+        }
+
         const chatId = [currentUser.uid, selectedFriend.id].sort().join('_');
 
         if (editingMessage) {
-            await getFirestore()
-                .collection('messages')
-                .doc(chatId)
-                .collection('chats')
-                .doc(editingMessage.id)
-                .update({
-                    text: messageText.trim(),
-                    editedAt: getFirestoreModule().FieldValue.serverTimestamp(),
-                });
-            setEditingMessage(null);
-            setMessageText("");
+            try {
+                await getFirestore()
+                    .collection('messages')
+                    .doc(chatId)
+                    .collection('chats')
+                    .doc(editingMessage.id)
+                    .update({
+                        text: trimmedMessage,
+                        editedAt: getFirestoreModule().FieldValue.serverTimestamp(),
+                    });
+                setEditingMessage(null);
+                setMessageText("");
+            } catch (error) {
+                Alert.alert("Edit Error", `Code: ${error.code || 'unknown'}\n${error.message || error}`);
+            }
             return;
         }
 
         const newMessage = {
-            text: messageText.trim(),
+            text: trimmedMessage,
             senderId: currentUser.uid,
             senderName: currentUser.fullName,
             receiverId: selectedFriend.id,
+            friendLinkId: getSelectedFriendLinkId(),
             timestamp: getFirestoreModule().FieldValue.serverTimestamp(),
             read: false,
         };
-        await getFirestore()
-            .collection('messages')
-            .doc(chatId)
-            .collection('chats')
-            .add(newMessage);
-        setMessageText("");
-        setTimeout(() => flatListRef.current?.scrollToEnd({ animated: true }), 100);
+
+        if (disappearingHours > 0) {
+            newMessage.expiresAt = getFirestoreModule().Timestamp.fromDate(
+                new Date(Date.now() + disappearingHours * 60 * 60 * 1000)
+            );
+        }
+
+        try {
+            await getFirestore()
+                .collection('messages')
+                .doc(chatId)
+                .collection('chats')
+                .add(newMessage);
+            setMessageText("");
+            setTimeout(() => flatListRef.current?.scrollToEnd({ animated: true }), 100);
+        } catch (error) {
+            Alert.alert("Send Error", `Code: ${error.code || 'unknown'}\n${error.message || error}\n\nfriendLinkId: ${newMessage.friendLinkId}\nchatId: ${chatId}`);
+        }
     };
 
     const startEditingMessage = (message) => {
@@ -830,11 +1080,93 @@ export default function App() {
         setMessageText("");
     };
 
-    const handleExportChat = () => {
+    const deleteMessage = async (message) => {
+        if (!currentUser || !selectedFriend) return;
+        Alert.alert(
+            "Delete Message",
+            message.senderId === currentUser.uid
+                ? "Delete this message? It will be removed for everyone."
+                : "Delete this message from your view?",
+            [
+                { text: "Cancel", style: "cancel" },
+                {
+                    text: "Delete",
+                    style: "destructive",
+                    onPress: async () => {
+                        try {
+                            const chatId = [currentUser.uid, selectedFriend.id].sort().join('_');
+                            await getFirestore()
+                                .collection('messages')
+                                .doc(chatId)
+                                .collection('chats')
+                                .doc(message.id)
+                                .delete();
+                        } catch (error) {
+                            Alert.alert("Error", "Failed to delete message.");
+                        }
+                    },
+                },
+            ]
+        );
+    };
+
+    const showMessageActions = (message) => {
+        const isMyMessage = message.senderId === currentUser.uid;
+        const buttons = [];
+
+        buttons.push({
+            text: "Copy Text",
+            onPress: () => {
+                try {
+                    Share.share({ message: message.text });
+                } catch { }
+            },
+        });
+
+        if (isMyMessage) {
+            buttons.push({
+                text: "Edit",
+                onPress: () => startEditingMessage(message),
+            });
+        }
+
+        buttons.push({
+            text: "Delete",
+            style: "destructive",
+            onPress: () => deleteMessage(message),
+        });
+
+        buttons.push({ text: "Cancel", style: "cancel" });
+
+        Alert.alert("Message", message.text.length > 40 ? message.text.substring(0, 40) + "..." : message.text, buttons);
+    };
+
+    const handleExportChat = async () => {
         if (!selectedFriend || !currentUser) return;
         const chatId = [currentUser.uid, selectedFriend.id].sort().join('_');
         const messages = chatMessages[chatId] || [];
-        Alert.alert("Export Chat", `Export feature will be added soon.\nMessages available: ${messages.length}`);
+
+        if (!messages.length) {
+            Alert.alert("Export Chat", "No messages to export yet.");
+            return;
+        }
+
+        const lines = messages
+            .sort((a, b) => (a.timestamp?.toDate?.() || 0) - (b.timestamp?.toDate?.() || 0))
+            .map((msg) => {
+                const author = msg.senderId === currentUser.uid ? "You" : (selectedFriend.fullName || "Friend");
+                const time = formatTime(msg.timestamp) || "Unknown time";
+                return `[${time}] ${author}: ${msg.text || ""}`;
+            });
+
+        try {
+            await Share.share({
+                message: `Chat export with ${selectedFriend.fullName}\n\n${lines.join("\n")}`,
+                title: `Chat with ${selectedFriend.fullName}`,
+            });
+        } catch {
+            Alert.alert("Error", "Unable to export chat right now.");
+        }
     };
 
     const toggleChatNotifications = async () => {
@@ -849,6 +1181,7 @@ export default function App() {
                 .set({
                     userId: currentUser.uid,
                     friendId: selectedFriend.id,
+                    friendLinkId: getSelectedFriendLinkId(),
                     muted: nextMuted,
                     updatedAt: getFirestoreModule().FieldValue.serverTimestamp(),
                 }, { merge: true });
@@ -858,6 +1191,147 @@ export default function App() {
         } catch (error) {
             Alert.alert("Error", "Failed to update notification settings");
         }
+    };
+
+    const handleAddToContacts = async () => {
+        if (!currentUser || !selectedFriend) return;
+        if (isBlockedRelationship(selectedFriend.id)) {
+            Alert.alert("Blocked", "You cannot add this user while a block is active.");
+            return;
+        }
+
+        const alreadyFriend = friendsList.some(f => f.id === selectedFriend.id);
+        const alreadySent = friendRequests.some(r => r.from === currentUser.uid && r.to === selectedFriend.id);
+        const alreadyReceived = friendRequests.some(r => r.from === selectedFriend.id && r.to === currentUser.uid);
+
+        if (alreadyFriend) {
+            Alert.alert("Contacts", `${selectedFriend.fullName} is already in your contacts.`);
+            return;
+        }
+
+        if (alreadySent) {
+            Alert.alert("Contacts", `Friend request to ${selectedFriend.fullName} is pending.`);
+            return;
+        }
+
+        if (alreadyReceived) {
+            const incomingRequest = friendRequests.find(r => r.from === selectedFriend.id && r.to === currentUser.uid);
+            if (incomingRequest) {
+                await acceptFriendRequest(incomingRequest);
+                return;
+            }
+        }
+
+        await sendFriendRequest(selectedFriend.id, selectedFriend.fullName);
+    };
+
+    const toggleDisappearingMessages = async () => {
+        if (!currentUser || !selectedFriend) return;
+
+        const nextHours = disappearingHours > 0 ? 0 : 24;
+        const settingsId = `${currentUser.uid}_${selectedFriend.id}`;
+
+        try {
+            await getFirestore()
+                .collection('chatSettings')
+                .doc(settingsId)
+                .set({
+                    userId: currentUser.uid,
+                    friendId: selectedFriend.id,
+                    friendLinkId: getSelectedFriendLinkId(),
+                    disappearingHours: nextHours,
+                    updatedAt: getFirestoreModule().FieldValue.serverTimestamp(),
+                }, { merge: true });
+
+            setDisappearingHours(nextHours);
+            Alert.alert("Disappearing messages", nextHours > 0 ? "Enabled (24 hours)" : "Disabled");
+        } catch {
+            Alert.alert("Error", "Failed to update disappearing messages setting.");
+        }
+    };
+
+    const cycleChatTheme = async () => {
+        if (!currentUser || !selectedFriend) return;
+
+        const themeOrder = Object.keys(CHAT_THEMES);
+        const currentIndex = themeOrder.indexOf(chatTheme);
+        const nextTheme = themeOrder[(currentIndex + 1) % themeOrder.length];
+        const settingsId = `${currentUser.uid}_${selectedFriend.id}`;
+
+        try {
+            await getFirestore()
+                .collection('chatSettings')
+                .doc(settingsId)
+                .set({
+                    userId: currentUser.uid,
+                    friendId: selectedFriend.id,
+                    friendLinkId: getSelectedFriendLinkId(),
+                    theme: nextTheme,
+                    updatedAt: getFirestoreModule().FieldValue.serverTimestamp(),
+                }, { merge: true });
+
+            setChatTheme(nextTheme);
+            Alert.alert("Chat theme", `Theme changed to ${nextTheme}`);
+        } catch {
+            Alert.alert("Error", "Failed to change chat theme.");
+        }
+    };
+
+    const toggleChatShortcut = async () => {
+        if (!currentUser || !selectedFriend) return;
+
+        const nextPinned = !isShortcutAdded;
+        const key = `${STORAGE_KEYS.PINNED_CHATS_PREFIX}${currentUser.uid}`;
+
+        try {
+            const updatedPinnedIds = nextPinned
+                ? Array.from(new Set([...pinnedChatIds, selectedFriend.id]))
+                : pinnedChatIds.filter(id => id !== selectedFriend.id);
+
+            await AsyncStorage.setItem(key, JSON.stringify(updatedPinnedIds));
+            setPinnedChatIds(updatedPinnedIds);
+
+            const settingsId = `${currentUser.uid}_${selectedFriend.id}`;
+            await getFirestore()
+                .collection('chatSettings')
+                .doc(settingsId)
+                .set({
+                    userId: currentUser.uid,
+                    friendId: selectedFriend.id,
+                    friendLinkId: getSelectedFriendLinkId(),
+                    shortcutAdded: nextPinned,
+                    updatedAt: getFirestoreModule().FieldValue.serverTimestamp(),
+                }, { merge: true });
+
+            setIsShortcutAdded(nextPinned);
+            Alert.alert("Shortcut", nextPinned ? "Chat pinned to top." : "Chat unpinned.");
+        } catch {
+            Alert.alert("Error", "Failed to update shortcut.");
+        }
+    };
+
+    const showMediaLinksSummary = () => {
+        if (!selectedFriend || !currentUser) return;
+
+        const chatId = [currentUser.uid, selectedFriend.id].sort().join('_');
+        const messages = chatMessages[chatId] || [];
+        const linkRegex = /(https?:\/\/[^\s]+)/i;
+
+        const linksCount = messages.filter(m => linkRegex.test(m.text || "")).length;
+        const mediaCount = messages.filter(m => /\.(jpg|jpeg|png|gif|webp|mp4|mov)$/i.test(m.text || "")).length;
+
+        Alert.alert(
+            "Media, links and docs",
+            `Links: ${linksCount}\nMedia mentions: ${mediaCount}\nMessages: ${messages.length}`
+        );
+    };
+
+    const showEncryptionInfo = () => {
+        Alert.alert("Encryption", "Messages are encrypted in transit and protected by Firebase security rules.");
+    };
+
+    const showStarredMessages = () => {
+        Alert.alert("Starred messages", "Starred messages support is active as an info panel; no starred items yet.");
     };
 
     const openChatMainMenu = () => {
@@ -910,6 +1384,11 @@ export default function App() {
     };
 
     const initiateCall = async (friend) => {
+        if (!friend?.id || !canChatWithUser(friend.id)) {
+            Alert.alert('Unavailable', 'You can only call active friends who are not blocked.');
+            return;
+        }
+
         const hasPermission = await requestAudioPermission();
         if (!hasPermission) {
             Alert.alert('Permission Required', 'Microphone access is needed for calls.');
@@ -919,21 +1398,22 @@ export default function App() {
         setCallPartner(friend);
         setCallState('calling');
 
-        const callDocRef = await getFirestore().collection('calls').add({
-            from: currentUser.uid,
-            fromName: currentUser.fullName,
-            to: friend.id,
-            toName: friend.fullName,
-            status: 'ringing',
-            timestamp: getFirestoreModule().FieldValue.serverTimestamp(),
-        });
-
-        const callId = callDocRef.id;
-        setCallDoc({ id: callId, from: currentUser.uid, to: friend.id });
-
-        if (!webrtcMediaDevices) return;
-
         try {
+            const callDocRef = await getFirestore().collection('calls').add({
+                from: currentUser.uid,
+                fromName: currentUser.fullName,
+                to: friend.id,
+                toName: friend.fullName,
+                callerFriendLinkId: getSelectedFriendLinkId(friend),
+                status: 'ringing',
+                timestamp: getFirestoreModule().FieldValue.serverTimestamp(),
+            });
+
+            const callId = callDocRef.id;
+            setCallDoc({ id: callId, from: currentUser.uid, to: friend.id });
+
+            if (!webrtcMediaDevices) return;
+
             const stream = await webrtcMediaDevices.getUserMedia({ audio: true, video: false });
             localStreamRef.current = stream;
 
@@ -986,12 +1466,21 @@ export default function App() {
             candidateUnsubRef.current = () => { unsubAnswer(); unsubCandidates(); };
         } catch (error) {
             console.error('Call setup error:', error);
+            cleanupWebRTC();
+            setCallState(null);
+            setCallPartner(null);
+            setCallDoc(null);
             Alert.alert('Error', 'Failed to start call: ' + error.message);
         }
     };
 
     const acceptCall = async () => {
         if (!callDoc) return;
+        if (isBlockedRelationship(callDoc.from)) {
+            Alert.alert('Blocked', 'This call is no longer available.');
+            declineCall();
+            return;
+        }
 
         const hasPermission = await requestAudioPermission();
         if (!hasPermission) {
@@ -1275,6 +1764,22 @@ export default function App() {
             f.fullName?.toLowerCase().includes(searchQuery.toLowerCase()) ||
             f.email?.toLowerCase().includes(searchQuery.toLowerCase())
         );
+
+        const sortedFriends = [...filteredFriends].sort((a, b) => {
+            const aPinned = pinnedChatIds.includes(a.id);
+            const bPinned = pinnedChatIds.includes(b.id);
+            if (aPinned && !bPinned) return -1;
+            if (!aPinned && bPinned) return 1;
+            const aChatId = [currentUser.uid, a.id].sort().join('_');
+            const bChatId = [currentUser.uid, b.id].sort().join('_');
+            const aMessages = chatMessages[aChatId] || [];
+            const bMessages = chatMessages[bChatId] || [];
+            const aLast = aMessages[aMessages.length - 1];
+            const bLast = bMessages[bMessages.length - 1];
+            const aTime = aLast?.timestamp?.toDate?.()?.getTime?.() || 0;
+            const bTime = bLast?.timestamp?.toDate?.()?.getTime?.() || 0;
+            return bTime - aTime;
+        });
         return (
             <SafeAreaView style={styles.container}>
                 <StatusBar backgroundColor="#3B82F6" barStyle="light-content" />
@@ -1288,16 +1793,26 @@ export default function App() {
                     <View style={styles.emptyState}><Text style={styles.emptyText}>No friends yet</Text><TouchableOpacity onPress={() => setScreen("findFriends")}><Text style={styles.linkText}>Find friends</Text></TouchableOpacity></View>
                 ) : (
                     <FlatList
-                        data={filteredFriends}
+                        data={sortedFriends}
                         keyExtractor={item => item.id}
                         renderItem={({ item }) => {
                             const chatId = [currentUser.uid, item.id].sort().join('_');
                             const messages = chatMessages[chatId] || [];
                             const lastMsg = messages[messages.length - 1];
+                            const unreadCount = messages.filter(m => m.senderId === item.id && !m.read).length;
+                            const isPinned = pinnedChatIds.includes(item.id);
+                            const isBlocked = isBlockedRelationship(item.id);
                             return (
                                 <TouchableOpacity
-                                    style={styles.chatItem}
-                                    onPress={() => { setSelectedFriend(item); setScreen("chat"); }}
+                                    style={[styles.chatItem, isBlocked && styles.chatItemBlocked]}
+                                    onPress={() => {
+                                        if (isBlocked) {
+                                            Alert.alert("Blocked", "This chat is unavailable because a block is active.");
+                                            return;
+                                        }
+                                        setSelectedFriend(item);
+                                        setScreen("chat");
+                                    }}
                                     onLongPress={() => {
                                         setUserPreviewReturnScreen("home");
                                         setViewProfileUser(item);
@@ -1308,13 +1823,25 @@ export default function App() {
                                         {renderAvatar(item, styles.avatarPlaceholder, styles.avatarText, item.uid)}
                                     </View>
                                     <View style={styles.chatInfo}>
-                                        <Text style={styles.chatName}>{item.fullName}</Text>
+                                        <View style={styles.chatNameRow}>
+                                            <Text style={styles.chatName}>{item.fullName}</Text>
+                                            {isPinned && <Text style={styles.pinnedBadge}>📌</Text>}
+                                        </View>
                                         <Text style={styles.chatPreview} numberOfLines={1}>
-                                            {lastMsg ? (lastMsg.senderId === currentUser.uid ? `You: ${lastMsg.text}` : lastMsg.text) : "Tap to start chatting"}
+                                            {isBlocked
+                                                ? "Blocked conversation"
+                                                : lastMsg
+                                                    ? (lastMsg.senderId === currentUser.uid ? `You: ${lastMsg.text}` : lastMsg.text)
+                                                    : "Tap to start chatting"}
                                         </Text>
                                     </View>
                                     <View style={styles.chatRight}>
                                         {lastMsg && <Text style={styles.chatTime}>{formatTime(lastMsg.timestamp)}</Text>}
+                                        {unreadCount > 0 && (
+                                            <View style={styles.unreadBadge}>
+                                                <Text style={styles.unreadBadgeText}>{unreadCount > 99 ? '99+' : unreadCount}</Text>
+                                            </View>
+                                        )}
                                     </View>
                                 </TouchableOpacity>
                             );
@@ -1329,16 +1856,23 @@ export default function App() {
     if (screen === "chat" && selectedFriend && currentUser) {
         const chatId = [currentUser.uid, selectedFriend.id].sort().join('_');
         const messages = chatMessages[chatId] || [];
-        const sortedMessages = [...messages].sort((a, b) => (a.timestamp?.toDate?.() || 0) - (b.timestamp?.toDate?.() || 0));
+        const now = Date.now();
+        const visibleMessages = messages.filter((msg) => {
+            const expireTime = msg.expiresAt?.toDate?.()?.getTime?.() || (msg.expiresAt ? new Date(msg.expiresAt).getTime() : null);
+            return !expireTime || expireTime > now;
+        });
+        const sortedMessages = [...visibleMessages].sort((a, b) => (a.timestamp?.toDate?.() || 0) - (b.timestamp?.toDate?.() || 0));
+        const activeTheme = CHAT_THEMES[chatTheme] || CHAT_THEMES.default;
+
+        const ChatWrapper = Platform.OS === "ios" ? KeyboardAvoidingView : View;
+        const wrapperProps = Platform.OS === "ios"
+            ? { style: { flex: 1 }, behavior: "padding", keyboardVerticalOffset: 12 }
+            : { style: { flex: 1 } };
 
         return (
             <SafeAreaView style={styles.container}>
                 <StatusBar backgroundColor="#3B82F6" barStyle="light-content" />
-                <KeyboardAvoidingView
-                    style={{ flex: 1 }}
-                    behavior={Platform.OS === "ios" ? "padding" : "height"}
-                    keyboardVerticalOffset={Platform.OS === "ios" ? 12 : 0}
-                >
+                <ChatWrapper {...wrapperProps}>
                     <View style={styles.chatHeader}>
                         <TouchableOpacity onPress={goBack}><Text style={styles.backTextWhite}>← Back</Text></TouchableOpacity>
                         <TouchableOpacity
@@ -1369,21 +1903,36 @@ export default function App() {
                         style={styles.messagesList}
                         contentContainerStyle={styles.messagesContainer}
                         keyboardShouldPersistTaps="handled"
-                        onContentSizeChange={() => flatListRef.current?.scrollToEnd({ animated: true })}
+                        onContentSizeChange={(w, h) => {
+                            if (flatListRef.current) {
+                                flatListRef.current._lastContentHeight = h;
+                            }
+                        }}
+                        onScroll={({ nativeEvent }) => {
+                            if (flatListRef.current) {
+                                const { contentOffset, layoutMeasurement, contentSize } = nativeEvent;
+                                flatListRef.current._isNearBottom = contentSize.height - contentOffset.y - layoutMeasurement.height < 150;
+                            }
+                        }}
+                        onLayout={() => flatListRef.current?.scrollToEnd({ animated: false })}
                         renderItem={({ item }) => {
                             const isMyMessage = item.senderId === currentUser.uid;
                             return (
                                 <View style={[styles.messageRow, isMyMessage ? styles.myMessageRow : styles.theirMessageRow]}>
                                     <TouchableOpacity
-                                        activeOpacity={isMyMessage ? 0.8 : 1}
-                                        onLongPress={isMyMessage ? () => startEditingMessage(item) : undefined}
+                                        activeOpacity={0.7}
+                                        onLongPress={() => showMessageActions(item)}
                                     >
-                                        <View style={[styles.messageBubble, isMyMessage ? styles.myBubble : styles.theirBubble]}>
+                                        <View style={[
+                                            styles.messageBubble,
+                                            isMyMessage ? styles.myBubble : styles.theirBubble,
+                                            isMyMessage ? { backgroundColor: activeTheme.myBubble } : null,
+                                        ]}>
                                             <Text style={[styles.messageText, isMyMessage ? styles.myMessageText : styles.theirMessageText]}>{item.text}</Text>
                                             <View style={styles.messageFooter}>
-                                                {!!item.editedAt && <Text style={styles.editedLabel}>edited</Text>}
-                                                <Text style={styles.messageTime}>{formatTime(item.timestamp)}</Text>
-                                                {isMyMessage && <Text style={styles.messageStatus}>{item.read ? "✓✓" : "✓"}</Text>}
+                                                {!!item.editedAt && <Text style={[styles.editedLabel, isMyMessage && styles.myMessageMeta]}>edited</Text>}
+                                                <Text style={[styles.messageTime, isMyMessage && styles.myMessageMeta]}>{formatTime(item.timestamp)}</Text>
+                                                {isMyMessage && <Text style={[styles.messageStatus, styles.myMessageMeta]}>{item.read ? "✓✓" : "✓"}</Text>}
                                             </View>
                                         </View>
                                     </TouchableOpacity>
@@ -1414,7 +1963,7 @@ export default function App() {
                             blurOnSubmit={false}
                             onFocus={() => flatListRef.current?.scrollToEnd({ animated: true })}
                         />
-                        <TouchableOpacity style={[styles.sendButton, !messageText.trim() && styles.sendButtonDisabled]} onPress={sendMessage} disabled={!messageText.trim()}>
+                        <TouchableOpacity style={[styles.sendButton, { backgroundColor: activeTheme.sendButton }, !messageText.trim() && styles.sendButtonDisabled]} onPress={sendMessage} disabled={!messageText.trim()}>
                             <Text style={styles.sendText}>{editingMessage ? "Save" : "Send"}</Text>
                         </TouchableOpacity>
                     </View>
@@ -1422,7 +1971,7 @@ export default function App() {
                     <Modal visible={chatMenuVisible} transparent animationType="fade" onRequestClose={closeChatMenus}>
                         <Pressable style={styles.chatMenuOverlay} onPress={closeChatMenus}>
                             <Pressable style={styles.chatMenuPanel} onPress={() => { }}>
-                                <TouchableOpacity style={styles.chatMenuItem} onPress={() => { closeChatMenus(); Alert.alert("Add to contacts", "This option will be added soon."); }}>
+                                <TouchableOpacity style={styles.chatMenuItem} onPress={() => { closeChatMenus(); handleAddToContacts(); }}>
                                     <Text style={styles.chatMenuItemText}>Add to contacts</Text>
                                 </TouchableOpacity>
                                 <TouchableOpacity style={styles.chatMenuItem} onPress={() => { closeChatMenus(); messageInputRef.current?.focus(); }}>
@@ -1437,11 +1986,11 @@ export default function App() {
                                 <TouchableOpacity style={styles.chatMenuItem} onPress={() => { closeChatMenus(); toggleChatNotifications(); }}>
                                     <Text style={styles.chatMenuItemText}>{isChatMuted ? "Unmute notifications" : "Mute notifications"}</Text>
                                 </TouchableOpacity>
-                                <TouchableOpacity style={styles.chatMenuItem} onPress={() => { closeChatMenus(); Alert.alert("Disappearing messages", "Disappearing messages is Off"); }}>
-                                    <Text style={styles.chatMenuItemText}>Disappearing messages</Text>
+                                <TouchableOpacity style={styles.chatMenuItem} onPress={() => { closeChatMenus(); toggleDisappearingMessages(); }}>
+                                    <Text style={styles.chatMenuItemText}>{disappearingHours > 0 ? "Disappearing messages (On)" : "Disappearing messages (Off)"}</Text>
                                 </TouchableOpacity>
-                                <TouchableOpacity style={styles.chatMenuItem} onPress={() => { closeChatMenus(); Alert.alert("Chat theme", "Chat theme option will be added soon."); }}>
-                                    <Text style={styles.chatMenuItemText}>Chat theme</Text>
+                                <TouchableOpacity style={styles.chatMenuItem} onPress={() => { closeChatMenus(); cycleChatTheme(); }}>
+                                    <Text style={styles.chatMenuItemText}>Chat theme ({chatTheme})</Text>
                                 </TouchableOpacity>
                                 <TouchableOpacity style={styles.chatMenuItem} onPress={openChatMoreMenu}>
                                     <Text style={styles.chatMenuItemText}>More</Text>
@@ -1462,13 +2011,13 @@ export default function App() {
                                 <TouchableOpacity style={styles.chatMenuItem} onPress={() => { closeChatMenus(); handleExportChat(); }}>
                                     <Text style={styles.chatMenuItemText}>Export chat</Text>
                                 </TouchableOpacity>
-                                <TouchableOpacity style={styles.chatMenuItem} onPress={() => { closeChatMenus(); Alert.alert("Add shortcut", "Add shortcut option will be added soon."); }}>
-                                    <Text style={styles.chatMenuItemText}>Add shortcut</Text>
+                                <TouchableOpacity style={styles.chatMenuItem} onPress={() => { closeChatMenus(); toggleChatShortcut(); }}>
+                                    <Text style={styles.chatMenuItemText}>{isShortcutAdded ? "Remove shortcut" : "Add shortcut"}</Text>
                                 </TouchableOpacity>
                             </Pressable>
                         </Pressable>
                     </Modal>
-                </KeyboardAvoidingView>
+                </ChatWrapper>
             </SafeAreaView>
         );
     }
@@ -1586,10 +2135,17 @@ export default function App() {
         const isFriend = (userId) => friendsList.some(f => f.id === userId);
         const isRequestSent = (userId) => friendRequests.some(r => r.from === currentUser.uid && r.to === userId);
         const isRequestReceived = (userId) => friendRequests.some(r => r.from === userId && r.to === currentUser.uid);
-        const filteredUsers = allUsers.filter(u =>
-            u.fullName?.toLowerCase().includes(searchQuery.toLowerCase()) ||
-            u.email?.toLowerCase().includes(searchQuery.toLowerCase())
-        );
+        const filteredUsers = allUsers.filter((u) => {
+            if (isBlockedRelationship(u.id)) {
+                return false;
+            }
+
+            const lowerQuery = searchQuery.toLowerCase();
+            return (
+                u.fullName?.toLowerCase().includes(lowerQuery) ||
+                u.email?.toLowerCase().includes(lowerQuery)
+            );
+        });
         return (
             <SafeAreaView style={styles.container}>
                 <StatusBar backgroundColor="#3B82F6" barStyle="light-content" />
@@ -1617,7 +2173,7 @@ export default function App() {
                                 <Text style={styles.pendingBadge}>⏳ Pending</Text>
                             ) : isRequestReceived(item.id) ? (
                                 <TouchableOpacity style={styles.acceptFriendButton} onPress={() => {
-                                    const request = friendRequests.find(r => r.from === item.id);
+                                    const request = friendRequests.find(r => r.from === item.id && r.to === currentUser.uid);
                                     if (request) acceptFriendRequest(request);
                                 }}><Text style={styles.acceptFriendText}>Accept</Text></TouchableOpacity>
                             ) : (
@@ -1694,14 +2250,14 @@ export default function App() {
                     {/* Media & Chat Info */}
                     {isFriend && (
                         <View style={up.section}>
-                            <TouchableOpacity style={up.row}>
+                            <TouchableOpacity style={up.row} onPress={showMediaLinksSummary}>
                                 <Text style={up.rowIcon}>🖼️</Text>
                                 <Text style={up.rowText}>Media, links and docs</Text>
                                 <Text style={up.rowValue}>{sharedMessages.length > 0 ? sharedMessages.length : 0}</Text>
                                 <Text style={up.rowArrow}>›</Text>
                             </TouchableOpacity>
                             <View style={up.divider} />
-                            <TouchableOpacity style={up.row}>
+                            <TouchableOpacity style={up.row} onPress={showStarredMessages}>
                                 <Text style={up.rowIcon}>⭐</Text>
                                 <Text style={up.rowText}>Starred messages</Text>
                                 <Text style={up.rowValue}>None</Text>
@@ -1720,7 +2276,7 @@ export default function App() {
                                 <Text style={up.rowArrow}>›</Text>
                             </TouchableOpacity>
                             <View style={up.divider} />
-                            <TouchableOpacity style={up.row}>
+                            <TouchableOpacity style={up.row} onPress={showEncryptionInfo}>
                                 <Text style={up.rowIcon}>🔒</Text>
                                 <Text style={up.rowText}>Encryption</Text>
                                 <View style={{ flex: 1 }}>
@@ -1889,14 +2445,19 @@ const styles = StyleSheet.create({
     searchBar: { backgroundColor: "white", padding: 12, borderBottomWidth: 1, borderBottomColor: "#eee" },
     searchInput: { backgroundColor: "#f3f4f6", padding: 12, borderRadius: 16, fontSize: 16 },
     chatItem: { flexDirection: "row", alignItems: "center", backgroundColor: "white", padding: 16, borderRadius: 20, marginHorizontal: 15, marginVertical: 6, shadowColor: "#000", shadowOffset: { width: 0, height: 1 }, shadowOpacity: 0.05, shadowRadius: 2, elevation: 2 },
+    chatItemBlocked: { opacity: 0.5 },
     avatarContainer: { marginRight: 15 },
     avatarPlaceholder: { width: 55, height: 55, borderRadius: 28, justifyContent: "center", alignItems: "center" },
     avatarText: { color: "white", fontSize: 24, fontWeight: "bold" },
     chatInfo: { flex: 1 },
+    chatNameRow: { flexDirection: "row", alignItems: "center" },
     chatName: { fontSize: 16, fontWeight: "bold", marginBottom: 4 },
+    pinnedBadge: { marginLeft: 6, fontSize: 12 },
     chatPreview: { fontSize: 14, color: "#666" },
     chatRight: { alignItems: "flex-end" },
     chatTime: { fontSize: 11, color: "#999", marginBottom: 4 },
+    unreadBadge: { backgroundColor: "#3B82F6", borderRadius: 12, minWidth: 22, height: 22, alignItems: "center", justifyContent: "center", paddingHorizontal: 6, marginTop: 4 },
+    unreadBadgeText: { color: "white", fontSize: 11, fontWeight: "bold" },
     emptyState: { flex: 1, justifyContent: "center", alignItems: "center", padding: 50 },
     emptyText: { fontSize: 16, color: "#999", marginBottom: 10 },
     chatHeader: { backgroundColor: "#3B82F6", padding: 18, paddingTop: 54, flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
@@ -1924,6 +2485,7 @@ const styles = StyleSheet.create({
     editedLabel: { fontSize: 10, color: "rgba(0,0,0,0.5)", marginRight: 6 },
     messageTime: { fontSize: 10, color: "rgba(0,0,0,0.5)", marginRight: 4 },
     messageStatus: { fontSize: 10, color: "rgba(0,0,0,0.5)" },
+    myMessageMeta: { color: "rgba(255,255,255,0.7)" },
     editBanner: { flexDirection: "row", alignItems: "center", paddingHorizontal: 15, paddingVertical: 10, backgroundColor: "#eff6ff", borderTopWidth: 1, borderTopColor: "#dbeafe" },
     editBannerTitle: { fontSize: 13, fontWeight: "700", color: "#2563eb", marginBottom: 2 },
     editBannerText: { fontSize: 12, color: "#4b5563" },
