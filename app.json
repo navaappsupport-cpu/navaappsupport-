@@ -21,7 +21,7 @@
         "backgroundColor": "#ffffff"
       },
       "edgeToEdgeEnabled": true,
-      "package": "com.ahmadkhan12.ChatConnect"
+      "package": "com.chatconnect.app"
     },
     "web": {
       "favicon": "./assets/favicon.png"
