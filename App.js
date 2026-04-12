@@ -578,15 +578,113 @@ export default function App() {
                 text: "Remove",
                 style: "destructive",
                 onPress: async () => {
-                    const friendsSnapshot = await getFirestore()
+                    // Remove both directions
+                    const mySnap = await getFirestore()
                         .collection('friends')
                         .where('userId', '==', currentUser.uid)
                         .where('friendId', '==', friendId)
                         .get();
-                    friendsSnapshot.forEach(async (doc) => {
-                        await doc.ref.delete();
-                    });
+                    const theirSnap = await getFirestore()
+                        .collection('friends')
+                        .where('userId', '==', friendId)
+                        .where('friendId', '==', currentUser.uid)
+                        .get();
+                    const batch = getFirestore().batch();
+                    mySnap.forEach(doc => batch.delete(doc.ref));
+                    theirSnap.forEach(doc => batch.delete(doc.ref));
+                    await batch.commit();
                     Alert.alert("Removed", `${friendName} removed from friends`);
+                    if (screen === "userPreview") goBack();
+                },
+            },
+        ]);
+    };
+
+    const blockUser = async (userId, userName) => {
+        Alert.alert("Block " + userName, `Block ${userName}? They won't be able to message or call you.`, [
+            { text: "Cancel", style: "cancel" },
+            {
+                text: "Block",
+                style: "destructive",
+                onPress: async () => {
+                    try {
+                        await getFirestore().collection('blocks').add({
+                            blockedBy: currentUser.uid,
+                            blockedUser: userId,
+                            blockedName: userName,
+                            timestamp: getFirestoreModule().FieldValue.serverTimestamp(),
+                        });
+                        // Also remove from friends if they are friends
+                        const mySnap = await getFirestore()
+                            .collection('friends')
+                            .where('userId', '==', currentUser.uid)
+                            .where('friendId', '==', userId)
+                            .get();
+                        const theirSnap = await getFirestore()
+                            .collection('friends')
+                            .where('userId', '==', userId)
+                            .where('friendId', '==', currentUser.uid)
+                            .get();
+                        const batch = getFirestore().batch();
+                        mySnap.forEach(doc => batch.delete(doc.ref));
+                        theirSnap.forEach(doc => batch.delete(doc.ref));
+                        await batch.commit();
+                        Alert.alert("Blocked", `${userName} has been blocked`);
+                        if (screen === "userPreview") goBack();
+                    } catch (error) {
+                        Alert.alert("Error", "Failed to block user");
+                    }
+                },
+            },
+        ]);
+    };
+
+    const reportUser = async (userId, userName) => {
+        Alert.alert("Report " + userName, "Report this user for inappropriate behavior?", [
+            { text: "Cancel", style: "cancel" },
+            {
+                text: "Report",
+                style: "destructive",
+                onPress: async () => {
+                    try {
+                        await getFirestore().collection('reports').add({
+                            reportedBy: currentUser.uid,
+                            reportedUser: userId,
+                            reportedName: userName,
+                            reason: 'inappropriate behavior',
+                            timestamp: getFirestoreModule().FieldValue.serverTimestamp(),
+                        });
+                        Alert.alert("Reported", "Thank you for your report. We will review it.");
+                    } catch (error) {
+                        Alert.alert("Error", "Failed to submit report");
+                    }
+                },
+            },
+        ]);
+    };
+
+    const clearChat = async (friendId, friendName) => {
+        Alert.alert("Clear Chat", `Delete all messages with ${friendName}?`, [
+            { text: "Cancel", style: "cancel" },
+            {
+                text: "Clear",
+                style: "destructive",
+                onPress: async () => {
+                    try {
+                        const chatId = [currentUser.uid, friendId].sort().join('_');
+                        const messagesSnap = await getFirestore()
+                            .collection('messages')
+                            .doc(chatId)
+                            .collection('chats')
+                            .get();
+                        const batch = getFirestore().batch();
+                        messagesSnap.forEach(doc => batch.delete(doc.ref));
+                        await batch.commit();
+                        setChatMessages(prev => ({ ...prev, [chatId]: [] }));
+                        Alert.alert("Cleared", "Chat history deleted");
+                    } catch (error) {
+                        Alert.alert("Error", "Failed to clear chat");
+                    }
                 },
             },
         ]);
@@ -1291,36 +1389,150 @@ export default function App() {
     // ==================== USER PREVIEW SCREEN ====================
     if (screen === "userPreview" && viewProfileUser && currentUser) {
         const isFriend = friendsList.some(f => f.id === viewProfileUser.id);
+        const chatId = [currentUser.uid, viewProfileUser.id].sort().join('_');
+        const sharedMessages = chatMessages[chatId] || [];
         return (
             <SafeAreaView style={styles.container}>
                 <StatusBar backgroundColor="#3B82F6" barStyle="light-content" />
                 <View style={styles.header}>
                     <TouchableOpacity onPress={goBack}><Text style={styles.backTextWhite}>← Back</Text></TouchableOpacity>
-                    <Text style={styles.headerTitle}>User Profile</Text>
+                    <Text style={styles.headerTitle}>Contact Info</Text>
                     <View style={{ width: 50 }} />
                 </View>
-                <View style={styles.profileHeader}>
-                    <View style={[styles.profileImagePlaceholder, { backgroundColor: generateUserColor(viewProfileUser.id) }]}>
-                        <Text style={styles.profileImageText}>{viewProfileUser.fullName?.charAt(0)}</Text>
+                <ScrollView>
+                    {/* Profile Section */}
+                    <View style={styles.profileHeader}>
+                        <View style={[styles.profileImagePlaceholder, { backgroundColor: generateUserColor(viewProfileUser.id) }]}>
+                            <Text style={styles.profileImageText}>{viewProfileUser.fullName?.charAt(0)}</Text>
+                        </View>
+                        <Text style={styles.profileName}>{viewProfileUser.fullName}</Text>
+                        <Text style={styles.profileUsername}>{viewProfileUser.email}</Text>
+                        {viewProfileUser.bio ? <Text style={styles.profileBio}>{viewProfileUser.bio}</Text> : null}
                     </View>
-                    <Text style={styles.profileName}>{viewProfileUser.fullName}</Text>
-                    <Text style={styles.profileUsername}>{viewProfileUser.email}</Text>
-                    <Text style={styles.profileBio}>{viewProfileUser.bio}</Text>
-                    {isFriend ? (
-                        <>
-                            <TouchableOpacity style={styles.messageButton} onPress={() => { setSelectedFriend(viewProfileUser); setScreen("chat"); }}>
-                                <Text style={styles.messageButtonText}>💬 Send Message</Text>
+
+                    {/* Action Buttons Row */}
+                    {isFriend && (
+                        <View style={up.actionRow}>
+                            <TouchableOpacity style={up.actionBtn} onPress={() => { setSelectedFriend(viewProfileUser); setScreen("chat"); }}>
+                                <Text style={up.actionIcon}>💬</Text>
+                                <Text style={up.actionLabel}>Message</Text>
                             </TouchableOpacity>
-                            <TouchableOpacity style={styles.removeFriendButton} onPress={() => removeFriend(viewProfileUser.id, viewProfileUser.fullName)}>
-                                <Text style={styles.removeFriendText}>Remove Friend</Text>
+                            <TouchableOpacity style={up.actionBtn} onPress={() => initiateCall(viewProfileUser)}>
+                                <Text style={up.actionIcon}>📞</Text>
+                                <Text style={up.actionLabel}>Audio</Text>
                             </TouchableOpacity>
-                        </>
-                    ) : (
-                        <TouchableOpacity style={styles.addFriendButton} onPress={() => sendFriendRequest(viewProfileUser.id, viewProfileUser.fullName)}>
-                            <Text style={styles.addFriendText}>➕ Add Friend</Text>
-                        </TouchableOpacity>
+                            <TouchableOpacity style={up.actionBtn} onPress={() => { setSearchQuery(""); setSelectedFriend(viewProfileUser); setScreen("chat"); }}>
+                                <Text style={up.actionIcon}>🔍</Text>
+                                <Text style={up.actionLabel}>Search</Text>
+                            </TouchableOpacity>
+                        </View>
                     )}
-                </View>
+
+                    {!isFriend && (
+                        <View style={{ paddingHorizontal: 15, marginBottom: 10 }}>
+                            <TouchableOpacity style={styles.addFriendButton} onPress={() => sendFriendRequest(viewProfileUser.id, viewProfileUser.fullName)}>
+                                <Text style={styles.addFriendText}>➕ Add Friend</Text>
+                            </TouchableOpacity>
+                        </View>
+                    )}
+
+                    {/* Media & Chat Info */}
+                    {isFriend && (
+                        <View style={up.section}>
+                            <TouchableOpacity style={up.row}>
+                                <Text style={up.rowIcon}>🖼️</Text>
+                                <Text style={up.rowText}>Media, links and docs</Text>
+                                <Text style={up.rowValue}>{sharedMessages.length > 0 ? sharedMessages.length : 0}</Text>
+                                <Text style={up.rowArrow}>›</Text>
+                            </TouchableOpacity>
+                            <View style={up.divider} />
+                            <TouchableOpacity style={up.row}>
+                                <Text style={up.rowIcon}>⭐</Text>
+                                <Text style={up.rowText}>Starred messages</Text>
+                                <Text style={up.rowValue}>None</Text>
+                                <Text style={up.rowArrow}>›</Text>
+                            </TouchableOpacity>
+                        </View>
+                    )}
+
+                    {/* Chat Settings */}
+                    {isFriend && (
+                        <View style={up.section}>
+                            <TouchableOpacity style={up.row}>
+                                <Text style={up.rowIcon}>🔔</Text>
+                                <Text style={up.rowText}>Notifications</Text>
+                                <Text style={up.rowArrow}>›</Text>
+                            </TouchableOpacity>
+                            <View style={up.divider} />
+                            <TouchableOpacity style={up.row}>
+                                <Text style={up.rowIcon}>🔒</Text>
+                                <Text style={up.rowText}>Encryption</Text>
+                                <View style={{ flex: 1 }}>
+                                    <Text style={up.rowSubtext}>Messages are end-to-end encrypted.</Text>
+                                </View>
+                                <Text style={up.rowArrow}>›</Text>
+                            </TouchableOpacity>
+                        </View>
+                    )}
+
+                    {/* Contact Details */}
+                    <View style={up.section}>
+                        <View style={up.row}>
+                            <Text style={up.rowIcon}>📧</Text>
+                            <View style={{ flex: 1 }}>
+                                <Text style={up.rowText}>{viewProfileUser.email}</Text>
+                                <Text style={up.rowSubtext}>Email</Text>
+                            </View>
+                        </View>
+                        {viewProfileUser.bio && (
+                            <>
+                                <View style={up.divider} />
+                                <View style={up.row}>
+                                    <Text style={up.rowIcon}>📝</Text>
+                                    <View style={{ flex: 1 }}>
+                                        <Text style={up.rowText}>{viewProfileUser.bio}</Text>
+                                        <Text style={up.rowSubtext}>About</Text>
+                                    </View>
+                                </View>
+                            </>
+                        )}
+                    </View>
+
+                    {/* Actions */}
+                    {isFriend && (
+                        <View style={up.section}>
+                            <TouchableOpacity style={up.row} onPress={() => clearChat(viewProfileUser.id, viewProfileUser.fullName)}>
+                                <Text style={up.rowIcon}>🗑️</Text>
+                                <Text style={[up.rowText, { color: '#ef4444' }]}>Clear chat</Text>
+                            </TouchableOpacity>
+                        </View>
+                    )}
+
+                    {/* Unfriend */}
+                    {isFriend && (
+                        <View style={up.section}>
+                            <TouchableOpacity style={up.row} onPress={() => removeFriend(viewProfileUser.id, viewProfileUser.fullName)}>
+                                <Text style={up.rowIcon}>👤</Text>
+                                <Text style={[up.rowText, { color: '#F59E0B' }]}>Unfriend {viewProfileUser.fullName}</Text>
+                            </TouchableOpacity>
+                        </View>
+                    )}
+
+                    {/* Block & Report */}
+                    <View style={up.section}>
+                        <TouchableOpacity style={up.row} onPress={() => blockUser(viewProfileUser.id, viewProfileUser.fullName)}>
+                            <Text style={up.rowIcon}>🚫</Text>
+                            <Text style={[up.rowText, { color: '#ef4444' }]}>Block {viewProfileUser.fullName}</Text>
+                        </TouchableOpacity>
+                        <View style={up.divider} />
+                        <TouchableOpacity style={up.row} onPress={() => reportUser(viewProfileUser.id, viewProfileUser.fullName)}>
+                            <Text style={up.rowIcon}>👎</Text>
+                            <Text style={[up.rowText, { color: '#ef4444' }]}>Report {viewProfileUser.fullName}</Text>
+                        </TouchableOpacity>
+                    </View>
+
+                    <View style={{ height: 30 }} />
+                </ScrollView>
             </SafeAreaView>
         );
     }
@@ -1528,4 +1740,20 @@ const styles = StyleSheet.create({
     muteCallBtnActive: { backgroundColor: "#F59E0B" },
     callBtnIcon: { color: "white", fontSize: 28, fontWeight: "bold" },
     callBtnLabel: { color: "white", fontSize: 11, marginTop: 3, fontWeight: "600" },
+});
+
+// User Preview styles
+const up = StyleSheet.create({
+    actionRow: { flexDirection: "row", justifyContent: "space-around", backgroundColor: "white", marginHorizontal: 15, marginBottom: 10, borderRadius: 16, paddingVertical: 15 },
+    actionBtn: { alignItems: "center", minWidth: 80 },
+    actionIcon: { fontSize: 24, marginBottom: 5 },
+    actionLabel: { fontSize: 13, color: "#3B82F6", fontWeight: "600" },
+    section: { backgroundColor: "white", marginHorizontal: 15, marginBottom: 10, borderRadius: 16, overflow: "hidden" },
+    row: { flexDirection: "row", alignItems: "center", padding: 16 },
+    rowIcon: { fontSize: 20, marginRight: 15, width: 28, textAlign: "center" },
+    rowText: { fontSize: 16, color: "#333", flex: 1 },
+    rowSubtext: { fontSize: 13, color: "#999", marginTop: 2 },
+    rowValue: { fontSize: 14, color: "#999", marginRight: 5 },
+    rowArrow: { fontSize: 22, color: "#ccc", fontWeight: "300" },
+    divider: { height: 1, backgroundColor: "#f0f0f0", marginLeft: 60 },
 });

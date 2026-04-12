@@ -24,6 +24,20 @@ service cloud.firestore {
       allow read, write: if request.auth != null;
     }
 
+    // Blocks: authenticated users can create/read their own blocks
+    match /blocks/{docId} {
+      allow create: if request.auth != null;
+      allow read: if request.auth != null && resource.data.blockedBy == request.auth.uid;
+      allow update, delete: if request.auth != null && resource.data.blockedBy == request.auth.uid;
+    }
+
+    // Reports: authenticated users can create and read their own reports
+    match /reports/{docId} {
+      allow create: if request.auth != null;
+      allow read: if request.auth != null && resource.data.reportedBy == request.auth.uid;
+      allow update, delete: if false;
+    }
+
     // Calls: authenticated users can read/write calls and ICE candidates
     match /calls/{docId} {
       allow read, write: if request.auth != null;
