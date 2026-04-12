@@ -1,0 +1,26 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Users can read/write their own user document
+    match /users/{userId} {
+      allow read: if request.auth != null;
+      allow write: if request.auth != null && request.auth.uid == userId;
+    }
+
+    // Messages: authenticated users can read/write in conversations they're part of
+    match /messages/{chatId}/{document=**} {
+      allow read, write: if request.auth != null;
+    }
+
+    // Friend requests: authenticated users can read/write
+    match /friendRequests/{docId} {
+      allow read, write: if request.auth != null;
+    }
+
+    // Friends: authenticated users can read/write
+    match /friends/{docId} {
+      allow read, write: if request.auth != null;
+    }
+  }
+}
