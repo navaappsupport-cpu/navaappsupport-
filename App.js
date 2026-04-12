@@ -169,6 +169,27 @@ export default function App() {
     const [privacyModalVisible, setPrivacyModalVisible] = useState(false);
 
     // Helper Functions
+    const renderAvatar = (user, containerStyle, textStyle, fallbackId) => {
+        const avatarUri = user?.photoUri;
+        const avatarLabel = user?.fullName?.charAt(0) || "U";
+        const avatarColor = generateUserColor(user?.uid || user?.id || fallbackId);
+
+        if (avatarUri) {
+            return (
+                <Image
+                    source={{ uri: avatarUri }}
+                    style={[containerStyle, styles.avatarImage]}
+                />
+            );
+        }
+
+        return (
+            <View style={[containerStyle, { backgroundColor: avatarColor }]}>
+                <Text style={textStyle}>{avatarLabel}</Text>
+            </View>
+        );
+    };
+
     const generateUserColor = (uid) => {
         const hash = uid?.split("").reduce((acc, char) => acc + char.charCodeAt(0), 0) || 0;
         return AVATAR_COLORS[hash % AVATAR_COLORS.length];
@@ -202,6 +223,34 @@ export default function App() {
         setStartupError(null);
         setIsLoading(true);
         setStartupRetryCount(prev => prev + 1);
+    };
+
+    const pickProfilePhoto = async () => {
+        try {
+            const result = await ImagePicker.launchImageLibraryAsync({
+                mediaTypes: ['images'],
+                allowsEditing: true,
+                aspect: [1, 1],
+                quality: 0.4,
+                base64: true,
+            });
+
+            if (result.canceled || !result.assets?.length) {
+                return;
+            }
+
+            const asset = result.assets[0];
+            const dataUri = asset.base64 ? `data:${asset.mimeType || 'image/jpeg'};base64,${asset.base64}` : asset.uri;
+
+            await getFirestore().collection('users').doc(currentUser.uid).set({
+                photoUri: dataUri,
+            }, { merge: true });
+
+            setCurrentUser(prev => ({ ...prev, photoUri: dataUri }));
+            Alert.alert("Success", "Profile photo updated");
+        } catch (error) {
+            Alert.alert("Error", "Failed to update profile photo");
+        }
     };
 
     // ==================== FIREBASE AUTH STATE ====================
@@ -1096,9 +1145,7 @@ export default function App() {
                 <StatusBar backgroundColor="#3B82F6" barStyle="light-content" />
                 <View style={styles.dashboardHeader}>
                     <TouchableOpacity onPress={() => setScreen("profile")} style={styles.profileButton}>
-                        <View style={[styles.headerAvatarPlaceholder, { backgroundColor: generateUserColor(currentUser.uid) }]}>
-                            <Text style={styles.headerAvatarText}>{currentUser.fullName?.charAt(0)}</Text>
-                        </View>
+                        {renderAvatar(currentUser, styles.headerAvatarPlaceholder, styles.headerAvatarText, currentUser.uid)}
                         <View>
                             <Text style={styles.welcomeText}>Hello, {currentUser.fullName}</Text>
                             <Text style={styles.statsText}>{friendsList.length} friends • {pendingCount} requests</Text>
@@ -1148,9 +1195,7 @@ export default function App() {
                             return (
                                 <TouchableOpacity style={styles.chatItem} onPress={() => { setSelectedFriend(item); setScreen("chat"); }}>
                                     <View style={styles.avatarContainer}>
-                                        <View style={[styles.avatarPlaceholder, { backgroundColor: generateUserColor(item.uid) }]}>
-                                            <Text style={styles.avatarText}>{item.fullName?.charAt(0)}</Text>
-                                        </View>
+                                        {renderAvatar(item, styles.avatarPlaceholder, styles.avatarText, item.uid)}
                                     </View>
                                     <View style={styles.chatInfo}>
                                         <Text style={styles.chatName}>{item.fullName}</Text>
@@ -1187,9 +1232,7 @@ export default function App() {
                     <View style={styles.chatHeader}>
                         <TouchableOpacity onPress={goBack}><Text style={styles.backTextWhite}>← Back</Text></TouchableOpacity>
                         <View style={styles.chatHeaderInfo}>
-                            <View style={[styles.chatAvatarPlaceholder, { backgroundColor: generateUserColor(selectedFriend.uid) }]}>
-                                <Text style={styles.chatAvatarText}>{selectedFriend.fullName?.charAt(0)}</Text>
-                            </View>
+                            {renderAvatar(selectedFriend, styles.chatAvatarPlaceholder, styles.chatAvatarText, selectedFriend.uid)}
                             <Text style={styles.chatHeaderName}>{selectedFriend.fullName}</Text>
                         </View>
                         <View style={{ flexDirection: 'row', alignItems: 'center' }}>
@@ -1296,9 +1339,12 @@ export default function App() {
                 </View>
                 <ScrollView>
                     <View style={styles.profileHeader}>
-                        <View style={[styles.profileImagePlaceholder, { backgroundColor: generateUserColor(currentUser.uid) }]}>
-                            <Text style={styles.profileImageText}>{currentUser.fullName?.charAt(0)}</Text>
-                        </View>
+                        <TouchableOpacity onPress={pickProfilePhoto} activeOpacity={0.8}>
+                            {renderAvatar(currentUser, styles.profileImagePlaceholder, styles.profileImageText, currentUser.uid)}
+                            <View style={styles.profilePhotoBadge}>
+                                <Text style={styles.profilePhotoBadgeText}>✎</Text>
+                            </View>
+                        </TouchableOpacity>
                         {editingProfile ? (
                             <>
                                 <TextInput style={styles.editInput} value={editName} onChangeText={setEditName} placeholder="Full Name" />
@@ -1374,9 +1420,7 @@ export default function App() {
                     renderItem={({ item }) => (
                         <View style={styles.userCard}>
                             <TouchableOpacity style={styles.userInfo} onPress={() => { setViewProfileUser(item); setScreen("userPreview"); }}>
-                                <View style={[styles.userAvatarPlaceholder, { backgroundColor: generateUserColor(item.id) }]}>
-                                    <Text style={styles.avatarText}>{item.fullName?.charAt(0)}</Text>
-                                </View>
+                                {renderAvatar(item, styles.userAvatarPlaceholder, styles.avatarText, item.id)}
                                 <View>
                                     <Text style={styles.userName}>{item.fullName}</Text>
                                     <Text style={styles.userUsername}>{item.email}</Text>
@@ -1430,9 +1474,7 @@ export default function App() {
                 <ScrollView>
                     {/* Profile Section */}
                     <View style={styles.profileHeader}>
-                        <View style={[styles.profileImagePlaceholder, { backgroundColor: generateUserColor(viewProfileUser.id) }]}>
-                            <Text style={styles.profileImageText}>{viewProfileUser.fullName?.charAt(0)}</Text>
-                        </View>
+                        {renderAvatar(viewProfileUser, styles.contactProfileImage, styles.profileImageText, viewProfileUser.id)}
                         <Text style={styles.profileName}>{viewProfileUser.fullName}</Text>
                         <Text style={styles.profileUsername}>{viewProfileUser.email}</Text>
                         {viewProfileUser.bio ? <Text style={styles.profileBio}>{viewProfileUser.bio}</Text> : null}
@@ -1645,6 +1687,7 @@ const styles = StyleSheet.create({
     profileButton: { flexDirection: "row", alignItems: "center", flex: 1 },
     headerAvatarPlaceholder: { width: 50, height: 50, borderRadius: 25, justifyContent: "center", alignItems: "center", marginRight: 12 },
     headerAvatarText: { color: "white", fontSize: 20, fontWeight: "bold" },
+    avatarImage: { backgroundColor: "#e5e7eb" },
     welcomeText: { color: "white", fontSize: 18, fontWeight: "bold" },
     statsText: { color: "rgba(255,255,255,0.9)", fontSize: 12, marginTop: 2 },
     logoutText: { color: "white", fontSize: 14, fontWeight: "600" },
@@ -1709,11 +1752,14 @@ const styles = StyleSheet.create({
     profileHeader: { backgroundColor: "white", alignItems: "center", padding: 30, marginBottom: 15 },
     profileImagePlaceholder: { width: 100, height: 100, borderRadius: 50, justifyContent: "center", alignItems: "center", marginBottom: 15 },
     profileImageText: { color: "white", fontSize: 48, fontWeight: "bold" },
+    contactProfileImage: { width: 140, height: 140, borderRadius: 70, justifyContent: "center", alignItems: "center", marginBottom: 18, borderWidth: 1, borderColor: "#d1d5db" },
     profileName: { fontSize: 24, fontWeight: "bold", marginTop: 10 },
     profileUsername: { fontSize: 16, color: "#666", marginTop: 5 },
     profileBio: { fontSize: 14, color: "#666", marginTop: 10, textAlign: "center" },
     editProfileButton: { marginTop: 15, padding: 10, backgroundColor: "#3B82F6", borderRadius: 20 },
     editProfileText: { color: "white", fontWeight: "bold" },
+    profilePhotoBadge: { position: "absolute", right: 0, bottom: 12, width: 32, height: 32, borderRadius: 16, backgroundColor: "#22c55e", alignItems: "center", justifyContent: "center", borderWidth: 3, borderColor: "white" },
+    profilePhotoBadgeText: { color: "white", fontSize: 14, fontWeight: "bold" },
     editButtons: { flexDirection: "row", justifyContent: "center", marginTop: 10 },
     cancelText: { color: "#666", fontSize: 16, marginRight: 20 },
     saveText: { color: "#3B82F6", fontSize: 16, fontWeight: "bold" },
