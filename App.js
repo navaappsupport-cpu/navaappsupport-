@@ -164,6 +164,7 @@ export default function App() {
     // UI State
     const [searchQuery, setSearchQuery] = useState("");
     const [viewProfileUser, setViewProfileUser] = useState(null);
+    const [userPreviewReturnScreen, setUserPreviewReturnScreen] = useState("findFriends");
 
     // Modals
     const [termsModalVisible, setTermsModalVisible] = useState(false);
@@ -218,7 +219,7 @@ export default function App() {
         else if (screen === "friendRequests") setScreen("dashboard");
         else if (screen === "profile") setScreen("dashboard");
         else if (screen === "findFriends") setScreen("dashboard");
-        else if (screen === "userPreview") setScreen("findFriends");
+        else if (screen === "userPreview") setScreen(userPreviewReturnScreen || "findFriends");
         else setScreen("dashboard");
     };
 
@@ -1261,10 +1262,18 @@ export default function App() {
                 >
                     <View style={styles.chatHeader}>
                         <TouchableOpacity onPress={goBack}><Text style={styles.backTextWhite}>← Back</Text></TouchableOpacity>
-                        <View style={styles.chatHeaderInfo}>
+                        <TouchableOpacity
+                            style={styles.chatHeaderInfo}
+                            activeOpacity={0.8}
+                            onPress={() => {
+                                setUserPreviewReturnScreen("chat");
+                                setViewProfileUser(selectedFriend);
+                                setScreen("userPreview");
+                            }}
+                        >
                             {renderAvatar(selectedFriend, styles.chatAvatarPlaceholder, styles.chatAvatarText, selectedFriend.uid)}
                             <Text style={styles.chatHeaderName}>{selectedFriend.fullName}</Text>
-                        </View>
+                        </TouchableOpacity>
                         <View style={{ flexDirection: 'row', alignItems: 'center' }}>
                             <TouchableOpacity onPress={() => initiateCall(selectedFriend)} style={{ marginRight: 15 }}>
                                 <Text style={{ color: 'white', fontSize: 22 }}>📞</Text>
@@ -1466,7 +1475,7 @@ export default function App() {
                     keyExtractor={item => item.id}
                     renderItem={({ item }) => (
                         <View style={styles.userCard}>
-                            <TouchableOpacity style={styles.userInfo} onPress={() => { setViewProfileUser(item); setScreen("userPreview"); }}>
+                            <TouchableOpacity style={styles.userInfo} onPress={() => { setUserPreviewReturnScreen("findFriends"); setViewProfileUser(item); setScreen("userPreview"); }}>
                                 {renderAvatar(item, styles.userAvatarPlaceholder, styles.avatarText, item.id)}
                                 <View>
                                     <Text style={styles.userName}>{item.fullName}</Text>
