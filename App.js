@@ -118,6 +118,7 @@ export default function App() {
     const [selectedFriend, setSelectedFriend] = useState(null);
     const [messageText, setMessageText] = useState("");
     const flatListRef = useRef(null);
+    const messageInputRef = useRef(null);
 
     // Call State
     const [callState, setCallState] = useState(null);
@@ -332,6 +333,16 @@ export default function App() {
             });
         return () => unsubscribe();
     }, [currentUser, selectedFriend]);
+
+    useEffect(() => {
+        if (screen !== "chat" || !selectedFriend) return;
+        const focusTimer = setTimeout(() => {
+            messageInputRef.current?.focus();
+            flatListRef.current?.scrollToEnd({ animated: false });
+        }, 150);
+
+        return () => clearTimeout(focusTimer);
+    }, [screen, selectedFriend]);
 
     useEffect(() => {
         if (!currentUser) return;
@@ -1168,51 +1179,68 @@ export default function App() {
         return (
             <SafeAreaView style={styles.container}>
                 <StatusBar backgroundColor="#3B82F6" barStyle="light-content" />
-                <View style={styles.chatHeader}>
-                    <TouchableOpacity onPress={goBack}><Text style={styles.backTextWhite}>← Back</Text></TouchableOpacity>
-                    <View style={styles.chatHeaderInfo}>
-                        <View style={[styles.chatAvatarPlaceholder, { backgroundColor: generateUserColor(selectedFriend.uid) }]}>
-                            <Text style={styles.chatAvatarText}>{selectedFriend.fullName?.charAt(0)}</Text>
+                <KeyboardAvoidingView
+                    style={{ flex: 1 }}
+                    behavior={Platform.OS === "ios" ? "padding" : "height"}
+                    keyboardVerticalOffset={Platform.OS === "ios" ? 12 : 0}
+                >
+                    <View style={styles.chatHeader}>
+                        <TouchableOpacity onPress={goBack}><Text style={styles.backTextWhite}>← Back</Text></TouchableOpacity>
+                        <View style={styles.chatHeaderInfo}>
+                            <View style={[styles.chatAvatarPlaceholder, { backgroundColor: generateUserColor(selectedFriend.uid) }]}>
+                                <Text style={styles.chatAvatarText}>{selectedFriend.fullName?.charAt(0)}</Text>
+                            </View>
+                            <Text style={styles.chatHeaderName}>{selectedFriend.fullName}</Text>
                         </View>
-                        <Text style={styles.chatHeaderName}>{selectedFriend.fullName}</Text>
+                        <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                            <TouchableOpacity onPress={() => initiateCall(selectedFriend)} style={{ marginRight: 15 }}>
+                                <Text style={{ color: 'white', fontSize: 22 }}>📞</Text>
+                            </TouchableOpacity>
+                            <TouchableOpacity onPress={() => removeFriend(selectedFriend.id, selectedFriend.fullName)}>
+                                <Text style={styles.removeIcon}>⋯</Text>
+                            </TouchableOpacity>
+                        </View>
                     </View>
-                    <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-                        <TouchableOpacity onPress={() => initiateCall(selectedFriend)} style={{ marginRight: 15 }}>
-                            <Text style={{ color: 'white', fontSize: 22 }}>📞</Text>
-                        </TouchableOpacity>
-                        <TouchableOpacity onPress={() => removeFriend(selectedFriend.id, selectedFriend.fullName)}>
-                            <Text style={styles.removeIcon}>⋯</Text>
-                        </TouchableOpacity>
-                    </View>
-                </View>
-                <FlatList
-                    ref={flatListRef}
-                    data={sortedMessages}
-                    keyExtractor={item => item.id}
-                    style={styles.messagesList}
-                    contentContainerStyle={styles.messagesContainer}
-                    onContentSizeChange={() => flatListRef.current?.scrollToEnd({ animated: true })}
-                    renderItem={({ item }) => {
-                        const isMyMessage = item.senderId === currentUser.uid;
-                        return (
-                            <View style={[styles.messageRow, isMyMessage ? styles.myMessageRow : styles.theirMessageRow]}>
-                                <View style={[styles.messageBubble, isMyMessage ? styles.myBubble : styles.theirBubble]}>
-                                    <Text style={[styles.messageText, isMyMessage ? styles.myMessageText : styles.theirMessageText]}>{item.text}</Text>
-                                    <View style={styles.messageFooter}>
-                                        <Text style={styles.messageTime}>{formatTime(item.timestamp)}</Text>
-                                        {isMyMessage && <Text style={styles.messageStatus}>{item.read ? "✓✓" : "✓"}</Text>}
+                    <FlatList
+                        ref={flatListRef}
+                        data={sortedMessages}
+                        keyExtractor={item => item.id}
+                        style={styles.messagesList}
+                        contentContainerStyle={styles.messagesContainer}
+                        keyboardShouldPersistTaps="handled"
+                        onContentSizeChange={() => flatListRef.current?.scrollToEnd({ animated: true })}
+                        renderItem={({ item }) => {
+                            const isMyMessage = item.senderId === currentUser.uid;
+                            return (
+                                <View style={[styles.messageRow, isMyMessage ? styles.myMessageRow : styles.theirMessageRow]}>
+                                    <View style={[styles.messageBubble, isMyMessage ? styles.myBubble : styles.theirBubble]}>
+                                        <Text style={[styles.messageText, isMyMessage ? styles.myMessageText : styles.theirMessageText]}>{item.text}</Text>
+                                        <View style={styles.messageFooter}>
+                                            <Text style={styles.messageTime}>{formatTime(item.timestamp)}</Text>
+                                            {isMyMessage && <Text style={styles.messageStatus}>{item.read ? "✓✓" : "✓"}</Text>}
+                                        </View>
                                     </View>
                                 </View>
-                            </View>
-                        );
-                    }}
-                />
-                <View style={styles.inputContainer}>
-                    <TextInput style={styles.messageInput} placeholder="Type a message..." value={messageText} onChangeText={setMessageText} multiline />
-                    <TouchableOpacity style={[styles.sendButton, !messageText.trim() && styles.sendButtonDisabled]} onPress={sendMessage} disabled={!messageText.trim()}>
-                        <Text style={styles.sendText}>Send</Text>
-                    </TouchableOpacity>
-                </View>
+                            );
+                        }}
+                    />
+                    <View style={styles.inputContainer}>
+                        <TextInput
+                            ref={messageInputRef}
+                            style={styles.messageInput}
+                            placeholder="Type a message..."
+                            value={messageText}
+                            onChangeText={setMessageText}
+                            multiline
+                            autoFocus
+                            blurOnSubmit={false}
+                            onFocus={() => flatListRef.current?.scrollToEnd({ animated: true })}
+                        />
+                        <TouchableOpacity style={[styles.sendButton, !messageText.trim() && styles.sendButtonDisabled]} onPress={sendMessage} disabled={!messageText.trim()}>
+                            <Text style={styles.sendText}>Send</Text>
+                        </TouchableOpacity>
+                    </View>
+                </KeyboardAvoidingView>
             </SafeAreaView>
         );
     }
