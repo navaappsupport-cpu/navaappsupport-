@@ -1224,7 +1224,15 @@ export default function App() {
                             const messages = chatMessages[chatId] || [];
                             const lastMsg = messages[messages.length - 1];
                             return (
-                                <TouchableOpacity style={styles.chatItem} onPress={() => { setSelectedFriend(item); setScreen("chat"); }}>
+                                <TouchableOpacity
+                                    style={styles.chatItem}
+                                    onPress={() => { setSelectedFriend(item); setScreen("chat"); }}
+                                    onLongPress={() => {
+                                        setUserPreviewReturnScreen("home");
+                                        setViewProfileUser(item);
+                                        setScreen("userPreview");
+                                    }}
+                                >
                                     <View style={styles.avatarContainer}>
                                         {renderAvatar(item, styles.avatarPlaceholder, styles.avatarText, item.uid)}
                                     </View>
