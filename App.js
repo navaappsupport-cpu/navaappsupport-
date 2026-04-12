@@ -214,7 +214,8 @@ export default function App() {
 
     useEffect(() => {
         if (!currentUser) return;
-        const unsubscribe = getFirestore()
+        // Listen for incoming friend requests (to me)
+        const unsubIncoming = getFirestore()
             .collection('friendRequests')
             .where('to', '==', currentUser.uid)
             .onSnapshot((snapshot) => {
@@ -222,9 +223,26 @@ export default function App() {
                 snapshot.forEach(doc => {
                     requests.push({ id: doc.id, ...doc.data() });
                 });
-                setFriendRequests(requests);
+                setFriendRequests(prev => {
+                    const outgoing = prev.filter(r => r.from === currentUser.uid);
+                    return [...requests, ...outgoing];
+                });
             });
-        return () => unsubscribe();
+        // Listen for outgoing friend requests (from me)
+        const unsubOutgoing = getFirestore()
+            .collection('friendRequests')
+            .where('from', '==', currentUser.uid)
+            .onSnapshot((snapshot) => {
+                const requests = [];
+                snapshot.forEach(doc => {
+                    requests.push({ id: doc.id, ...doc.data() });
+                });
+                setFriendRequests(prev => {
+                    const incoming = prev.filter(r => r.to === currentUser.uid);
+                    return [...incoming, ...requests];
+                });
+            });
+        return () => { unsubIncoming(); unsubOutgoing(); };
     }, [currentUser]);
 
     useEffect(() => {
@@ -266,17 +284,20 @@ export default function App() {
 
     useEffect(() => {
         if (!currentUser) return;
-        const fetchUsers = async () => {
-            const snapshot = await getFirestore().collection('users').get();
-            const users = [];
-            snapshot.forEach(doc => {
-                if (doc.id !== currentUser.uid) {
-                    users.push({ id: doc.id, ...doc.data() });
-                }
+        const unsubscribe = getFirestore()
+            .collection('users')
+            .onSnapshot((snapshot) => {
+                const users = [];
+                snapshot.forEach(doc => {
+                    if (doc.id !== currentUser.uid) {
+                        users.push({ id: doc.id, ...doc.data() });
+                    }
+                });
+                setAllUsers(users);
+            }, (error) => {
+                console.error('Error fetching users:', error);
             });
-            setAllUsers(users);
-        };
-        fetchUsers();
+        return () => unsubscribe();
     }, [currentUser]);
 
     // ==================== AUTH FUNCTIONS ====================
