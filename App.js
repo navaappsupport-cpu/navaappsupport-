@@ -117,6 +117,7 @@ export default function App() {
     const [chatMessages, setChatMessages] = useState({});
     const [selectedFriend, setSelectedFriend] = useState(null);
     const [messageText, setMessageText] = useState("");
+    const [editingMessage, setEditingMessage] = useState(null);
     const flatListRef = useRef(null);
     const messageInputRef = useRef(null);
 
@@ -209,6 +210,8 @@ export default function App() {
     // Navigation
     const goBack = () => {
         setSearchQuery("");
+        setEditingMessage(null);
+        setMessageText("");
         if (screen === "register") setScreen("welcome");
         else if (screen === "home") setScreen("dashboard");
         else if (screen === "chat") setScreen("home");
@@ -755,6 +758,22 @@ export default function App() {
     const sendMessage = async () => {
         if (!messageText.trim() || !selectedFriend) return;
         const chatId = [currentUser.uid, selectedFriend.id].sort().join('_');
+
+        if (editingMessage) {
+            await getFirestore()
+                .collection('messages')
+                .doc(chatId)
+                .collection('chats')
+                .doc(editingMessage.id)
+                .update({
+                    text: messageText.trim(),
+                    editedAt: getFirestoreModule().FieldValue.serverTimestamp(),
+                });
+            setEditingMessage(null);
+            setMessageText("");
+            return;
+        }
+
         const newMessage = {
             text: messageText.trim(),
             senderId: currentUser.uid,
@@ -770,6 +789,17 @@ export default function App() {
             .add(newMessage);
         setMessageText("");
         setTimeout(() => flatListRef.current?.scrollToEnd({ animated: true }), 100);
+    };
+
+    const startEditingMessage = (message) => {
+        setEditingMessage(message);
+        setMessageText(message.text || "");
+        setTimeout(() => messageInputRef.current?.focus(), 100);
+    };
+
+    const cancelEditingMessage = () => {
+        setEditingMessage(null);
+        setMessageText("");
     };
 
     // ==================== CALL FUNCTIONS ====================
@@ -1256,17 +1286,34 @@ export default function App() {
                             const isMyMessage = item.senderId === currentUser.uid;
                             return (
                                 <View style={[styles.messageRow, isMyMessage ? styles.myMessageRow : styles.theirMessageRow]}>
-                                    <View style={[styles.messageBubble, isMyMessage ? styles.myBubble : styles.theirBubble]}>
-                                        <Text style={[styles.messageText, isMyMessage ? styles.myMessageText : styles.theirMessageText]}>{item.text}</Text>
-                                        <View style={styles.messageFooter}>
-                                            <Text style={styles.messageTime}>{formatTime(item.timestamp)}</Text>
-                                            {isMyMessage && <Text style={styles.messageStatus}>{item.read ? "✓✓" : "✓"}</Text>}
+                                    <TouchableOpacity
+                                        activeOpacity={isMyMessage ? 0.8 : 1}
+                                        onLongPress={isMyMessage ? () => startEditingMessage(item) : undefined}
+                                    >
+                                        <View style={[styles.messageBubble, isMyMessage ? styles.myBubble : styles.theirBubble]}>
+                                            <Text style={[styles.messageText, isMyMessage ? styles.myMessageText : styles.theirMessageText]}>{item.text}</Text>
+                                            <View style={styles.messageFooter}>
+                                                {!!item.editedAt && <Text style={styles.editedLabel}>edited</Text>}
+                                                <Text style={styles.messageTime}>{formatTime(item.timestamp)}</Text>
+                                                {isMyMessage && <Text style={styles.messageStatus}>{item.read ? "✓✓" : "✓"}</Text>}
+                                            </View>
                                         </View>
-                                    </View>
+                                    </TouchableOpacity>
                                 </View>
                             );
                         }}
                     />
+                    {editingMessage && (
+                        <View style={styles.editBanner}>
+                            <View style={{ flex: 1 }}>
+                                <Text style={styles.editBannerTitle}>Editing message</Text>
+                                <Text style={styles.editBannerText} numberOfLines={1}>{editingMessage.text}</Text>
+                            </View>
+                            <TouchableOpacity onPress={cancelEditingMessage}>
+                                <Text style={styles.editBannerCancel}>Cancel</Text>
+                            </TouchableOpacity>
+                        </View>
+                    )}
                     <View style={styles.inputContainer}>
                         <TextInput
                             ref={messageInputRef}
@@ -1280,7 +1327,7 @@ export default function App() {
                             onFocus={() => flatListRef.current?.scrollToEnd({ animated: true })}
                         />
                         <TouchableOpacity style={[styles.sendButton, !messageText.trim() && styles.sendButtonDisabled]} onPress={sendMessage} disabled={!messageText.trim()}>
-                            <Text style={styles.sendText}>Send</Text>
+                            <Text style={styles.sendText}>{editingMessage ? "Save" : "Send"}</Text>
                         </TouchableOpacity>
                     </View>
                 </KeyboardAvoidingView>
@@ -1731,8 +1778,13 @@ const styles = StyleSheet.create({
     myMessageText: { color: "white" },
     theirMessageText: { color: "#000" },
     messageFooter: { flexDirection: "row", justifyContent: "flex-end", alignItems: "center", marginTop: 4 },
+    editedLabel: { fontSize: 10, color: "rgba(0,0,0,0.5)", marginRight: 6 },
     messageTime: { fontSize: 10, color: "rgba(0,0,0,0.5)", marginRight: 4 },
     messageStatus: { fontSize: 10, color: "rgba(0,0,0,0.5)" },
+    editBanner: { flexDirection: "row", alignItems: "center", paddingHorizontal: 15, paddingVertical: 10, backgroundColor: "#eff6ff", borderTopWidth: 1, borderTopColor: "#dbeafe" },
+    editBannerTitle: { fontSize: 13, fontWeight: "700", color: "#2563eb", marginBottom: 2 },
+    editBannerText: { fontSize: 12, color: "#4b5563" },
+    editBannerCancel: { fontSize: 13, fontWeight: "700", color: "#ef4444", marginLeft: 12 },
     inputContainer: { flexDirection: "row", padding: 15, backgroundColor: "white", borderTopWidth: 1, borderTopColor: "#eee", alignItems: "center" },
     messageInput: { flex: 1, backgroundColor: "#f3f4f6", borderRadius: 24, paddingHorizontal: 18, paddingVertical: 10, fontSize: 16, maxHeight: 100 },
     sendButton: { backgroundColor: "#3B82F6", borderRadius: 24, paddingHorizontal: 22, paddingVertical: 10, marginLeft: 10 },
