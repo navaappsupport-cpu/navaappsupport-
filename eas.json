@@ -11,6 +11,7 @@
     "preview": {
       "distribution": "internal",
       "node": "24.13.0",
+      "channel": "preview",
       "android": {
         "buildType": "apk"
       }
@@ -24,8 +25,5 @@
   },
   "submit": {
     "production": {}
-  },
-  "update": {
-    "channel": "preview"
   }
 }
