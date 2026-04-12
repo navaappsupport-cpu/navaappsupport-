@@ -16,6 +16,7 @@ import {
     ActivityIndicator,
     KeyboardAvoidingView,
     Platform,
+    PermissionsAndroid,
 } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 
@@ -65,6 +66,25 @@ const STORAGE_KEYS = {
     SESSION: "APP_SESSION",
 };
 
+// WebRTC for real audio calls
+let RTCPeerConnection, RTCSessionDescription, RTCIceCandidate, webrtcMediaDevices;
+try {
+    const webrtc = require('react-native-webrtc');
+    RTCPeerConnection = webrtc.RTCPeerConnection;
+    RTCSessionDescription = webrtc.RTCSessionDescription;
+    RTCIceCandidate = webrtc.RTCIceCandidate;
+    webrtcMediaDevices = webrtc.mediaDevices;
+} catch (e) {
+    console.warn('WebRTC not available:', e.message);
+}
+
+const ICE_SERVERS = {
+    iceServers: [
+        { urls: 'stun:stun.l.google.com:19302' },
+        { urls: 'stun:stun1.l.google.com:19302' },
+    ],
+};
+
 const AVATAR_COLORS = [
     "#3B82F6", "#4CAF50", "#9C27B0", "#FF9800", "#795548",
     "#E91E63", "#009688", "#3F51B5", "#FF5722", "#607D8B",
@@ -104,8 +124,13 @@ export default function App() {
     const [callPartner, setCallPartner] = useState(null);
     const [callDoc, setCallDoc] = useState(null);
     const [callDuration, setCallDuration] = useState(0);
+    const [isMuted, setIsMuted] = useState(false);
+    const [isSpeaker, setIsSpeaker] = useState(false);
     const callTimerRef = useRef(null);
     const callStateRef = useRef(null);
+    const peerConnectionRef = useRef(null);
+    const localStreamRef = useRef(null);
+    const candidateUnsubRef = useRef(null);
 
     useEffect(() => {
         if (screen !== "chat" || !selectedFriend || !currentUser) return;
@@ -343,6 +368,7 @@ export default function App() {
                     if (data.status === 'active' && callStateRef.current !== 'active') {
                         setCallState('active');
                     } else if (data.status === 'ended') {
+                        cleanupWebRTC();
                         setCallState(null);
                         setCallPartner(null);
                         setCallDoc(null);
@@ -543,9 +569,48 @@ export default function App() {
 
     // ==================== CALL FUNCTIONS ====================
 
+    const cleanupWebRTC = () => {
+        if (candidateUnsubRef.current) {
+            candidateUnsubRef.current();
+            candidateUnsubRef.current = null;
+        }
+        if (peerConnectionRef.current) {
+            peerConnectionRef.current.close();
+            peerConnectionRef.current = null;
+        }
+        if (localStreamRef.current) {
+            localStreamRef.current.getTracks().forEach(track => track.stop());
+            localStreamRef.current = null;
+        }
+        setIsMuted(false);
+        setIsSpeaker(false);
+    };
+
+    const requestAudioPermission = async () => {
+        if (Platform.OS === 'android') {
+            const granted = await PermissionsAndroid.request(
+                PermissionsAndroid.PERMISSIONS.RECORD_AUDIO,
+                {
+                    title: 'Microphone Permission',
+                    message: 'ChatConnect needs microphone access for voice calls.',
+                    buttonPositive: 'Allow',
+                }
+            );
+            return granted === PermissionsAndroid.RESULTS.GRANTED;
+        }
+        return true;
+    };
+
     const initiateCall = async (friend) => {
+        const hasPermission = await requestAudioPermission();
+        if (!hasPermission) {
+            Alert.alert('Permission Required', 'Microphone access is needed for calls.');
+            return;
+        }
+
         setCallPartner(friend);
         setCallState('calling');
+
         const callDocRef = await getFirestore().collection('calls').add({
             from: currentUser.uid,
             fromName: currentUser.fullName,
@@ -554,13 +619,133 @@ export default function App() {
             status: 'ringing',
             timestamp: getFirestoreModule().FieldValue.serverTimestamp(),
         });
-        setCallDoc({ id: callDocRef.id, from: currentUser.uid, to: friend.id });
+
+        const callId = callDocRef.id;
+        setCallDoc({ id: callId, from: currentUser.uid, to: friend.id });
+
+        if (!webrtcMediaDevices) return;
+
+        try {
+            const stream = await webrtcMediaDevices.getUserMedia({ audio: true, video: false });
+            localStreamRef.current = stream;
+
+            const pc = new RTCPeerConnection(ICE_SERVERS);
+            peerConnectionRef.current = pc;
+
+            stream.getTracks().forEach(track => pc.addTrack(track, stream));
+
+            pc.onicecandidate = (event) => {
+                if (event.candidate) {
+                    getFirestore()
+                        .collection('calls').doc(callId)
+                        .collection('callerCandidates')
+                        .add(event.candidate.toJSON());
+                }
+            };
+
+            const offer = await pc.createOffer();
+            await pc.setLocalDescription(offer);
+
+            await getFirestore().collection('calls').doc(callId).update({
+                offer: { type: offer.type, sdp: offer.sdp },
+            });
+
+            // Listen for answer from callee
+            const unsubAnswer = getFirestore().collection('calls').doc(callId)
+                .onSnapshot(async (snapshot) => {
+                    const data = snapshot.data();
+                    if (data?.answer && pc && !pc.currentRemoteDescription) {
+                        try {
+                            await pc.setRemoteDescription(new RTCSessionDescription(data.answer));
+                        } catch (e) { console.warn('setRemoteDescription error:', e); }
+                    }
+                });
+
+            // Listen for callee ICE candidates
+            const unsubCandidates = getFirestore()
+                .collection('calls').doc(callId)
+                .collection('calleeCandidates')
+                .onSnapshot((snapshot) => {
+                    snapshot.docChanges().forEach(async (change) => {
+                        if (change.type === 'added') {
+                            try {
+                                await pc.addIceCandidate(new RTCIceCandidate(change.doc.data()));
+                            } catch (e) { console.warn('addIceCandidate error:', e); }
+                        }
+                    });
+                });
+
+            candidateUnsubRef.current = () => { unsubAnswer(); unsubCandidates(); };
+        } catch (error) {
+            console.error('Call setup error:', error);
+            Alert.alert('Error', 'Failed to start call: ' + error.message);
+        }
     };
 
     const acceptCall = async () => {
-        if (callDoc) {
-            await getFirestore().collection('calls').doc(callDoc.id).update({ status: 'active' });
+        if (!callDoc) return;
+
+        const hasPermission = await requestAudioPermission();
+        if (!hasPermission) {
+            Alert.alert('Permission Required', 'Microphone access is needed for calls.');
+            return;
+        }
+
+        try {
+            const callSnapshot = await getFirestore().collection('calls').doc(callDoc.id).get();
+            const callData = callSnapshot.data();
+
+            if (!callData?.offer || !webrtcMediaDevices) {
+                await getFirestore().collection('calls').doc(callDoc.id).update({ status: 'active' });
+                setCallState('active');
+                return;
+            }
+
+            const stream = await webrtcMediaDevices.getUserMedia({ audio: true, video: false });
+            localStreamRef.current = stream;
+
+            const pc = new RTCPeerConnection(ICE_SERVERS);
+            peerConnectionRef.current = pc;
+
+            stream.getTracks().forEach(track => pc.addTrack(track, stream));
+
+            pc.onicecandidate = (event) => {
+                if (event.candidate) {
+                    getFirestore()
+                        .collection('calls').doc(callDoc.id)
+                        .collection('calleeCandidates')
+                        .add(event.candidate.toJSON());
+                }
+            };
+
+            await pc.setRemoteDescription(new RTCSessionDescription(callData.offer));
+            const answer = await pc.createAnswer();
+            await pc.setLocalDescription(answer);
+
+            await getFirestore().collection('calls').doc(callDoc.id).update({
+                status: 'active',
+                answer: { type: answer.type, sdp: answer.sdp },
+            });
+
+            // Listen for caller ICE candidates
+            const unsubCandidates = getFirestore()
+                .collection('calls').doc(callDoc.id)
+                .collection('callerCandidates')
+                .onSnapshot((snapshot) => {
+                    snapshot.docChanges().forEach(async (change) => {
+                        if (change.type === 'added') {
+                            try {
+                                await pc.addIceCandidate(new RTCIceCandidate(change.doc.data()));
+                            } catch (e) { console.warn('addIceCandidate error:', e); }
+                        }
+                    });
+                });
+
+            candidateUnsubRef.current = () => { unsubCandidates(); };
             setCallState('active');
+        } catch (error) {
+            console.error('Accept call error:', error);
+            Alert.alert('Error', 'Failed to accept call: ' + error.message);
         }
     };
 
@@ -570,6 +755,7 @@ export default function App() {
                 await getFirestore().collection('calls').doc(callDoc.id).update({ status: 'ended' });
             } catch (e) { }
         }
+        cleanupWebRTC();
         setCallState(null);
         setCallPartner(null);
         setCallDoc(null);
@@ -581,9 +767,20 @@ export default function App() {
                 await getFirestore().collection('calls').doc(callDoc.id).update({ status: 'ended' });
             } catch (e) { }
         }
+        cleanupWebRTC();
         setCallState(null);
         setCallPartner(null);
         setCallDoc(null);
+    };
+
+    const toggleMute = () => {
+        if (localStreamRef.current) {
+            const audioTrack = localStreamRef.current.getAudioTracks()[0];
+            if (audioTrack) {
+                audioTrack.enabled = !audioTrack.enabled;
+                setIsMuted(!audioTrack.enabled);
+            }
+        }
     };
 
     const formatCallDuration = (seconds) => {
@@ -1084,7 +1281,7 @@ export default function App() {
                     <Text style={styles.callStatus}>
                         {callState === 'calling' ? '📞 Calling...' : callState === 'incoming' ? '📲 Incoming Call' : formatCallDuration(callDuration)}
                     </Text>
-                    {callState === 'active' && <Text style={styles.callActiveLabel}>Connected</Text>}
+                    {callState === 'active' && <Text style={styles.callActiveLabel}>🔊 Connected</Text>}
                 </View>
                 <View style={styles.callActions}>
                     {callState === 'incoming' && (
@@ -1100,10 +1297,18 @@ export default function App() {
                         </View>
                     )}
                     {(callState === 'calling' || callState === 'active') && (
-                        <TouchableOpacity style={styles.endCallBtn} onPress={endCall}>
-                            <Text style={styles.callBtnIcon}>✕</Text>
-                            <Text style={styles.callBtnLabel}>End Call</Text>
-                        </TouchableOpacity>
+                        <View style={styles.callButtonsRow}>
+                            {callState === 'active' && (
+                                <TouchableOpacity style={[styles.muteCallBtn, isMuted && styles.muteCallBtnActive]} onPress={toggleMute}>
+                                    <Text style={styles.callBtnIcon}>{isMuted ? '🔇' : '🎙️'}</Text>
+                                    <Text style={styles.callBtnLabel}>{isMuted ? 'Unmute' : 'Mute'}</Text>
+                                </TouchableOpacity>
+                            )}
+                            <TouchableOpacity style={styles.endCallBtn} onPress={endCall}>
+                                <Text style={styles.callBtnIcon}>✕</Text>
+                                <Text style={styles.callBtnLabel}>End Call</Text>
+                            </TouchableOpacity>
+                        </View>
                     )}
                 </View>
             </SafeAreaView>
@@ -1261,7 +1466,9 @@ const styles = StyleSheet.create({
     callButtonsRow: { flexDirection: "row", justifyContent: "center", width: "100%" },
     declineCallBtn: { backgroundColor: "#ef4444", width: 75, height: 75, borderRadius: 38, justifyContent: "center", alignItems: "center", marginHorizontal: 30 },
     acceptCallBtn: { backgroundColor: "#22c55e", width: 75, height: 75, borderRadius: 38, justifyContent: "center", alignItems: "center", marginHorizontal: 30 },
-    endCallBtn: { backgroundColor: "#ef4444", width: 75, height: 75, borderRadius: 38, justifyContent: "center", alignItems: "center" },
+    endCallBtn: { backgroundColor: "#ef4444", width: 75, height: 75, borderRadius: 38, justifyContent: "center", alignItems: "center", marginHorizontal: 15 },
+    muteCallBtn: { backgroundColor: "#444", width: 65, height: 65, borderRadius: 33, justifyContent: "center", alignItems: "center", marginHorizontal: 15 },
+    muteCallBtnActive: { backgroundColor: "#F59E0B" },
     callBtnIcon: { color: "white", fontSize: 28, fontWeight: "bold" },
     callBtnLabel: { color: "white", fontSize: 11, marginTop: 3, fontWeight: "600" },
 });
