@@ -156,6 +156,8 @@ export default function App() {
     const [friendsList, setFriendsList] = useState([]);
     const [friendRequests, setFriendRequests] = useState([]);
     const [allUsers, setAllUsers] = useState([]);
+    const [usersLoading, setUsersLoading] = useState(true);
+    const [usersError, setUsersError] = useState(null);
 
     // UI State
     const [searchQuery, setSearchQuery] = useState("");
@@ -184,6 +186,7 @@ export default function App() {
 
     // Navigation
     const goBack = () => {
+        setSearchQuery("");
         if (screen === "register") setScreen("welcome");
         else if (screen === "home") setScreen("dashboard");
         else if (screen === "chat") setScreen("home");
@@ -317,6 +320,8 @@ export default function App() {
 
     useEffect(() => {
         if (!currentUser) return;
+        setUsersLoading(true);
+        setUsersError(null);
         const unsubscribe = getFirestore()
             .collection('users')
             .onSnapshot((snapshot) => {
@@ -327,8 +332,13 @@ export default function App() {
                     }
                 });
                 setAllUsers(users);
+                setUsersLoading(false);
+                setUsersError(null);
             }, (error) => {
                 console.error('Error fetching users:', error);
+                setUsersLoading(false);
+                setUsersError(error.message || 'Failed to load users');
+                Alert.alert('Error', 'Failed to load users: ' + (error.message || 'Unknown error'));
             });
         return () => unsubscribe();
     }, [currentUser]);
@@ -956,9 +966,9 @@ export default function App() {
                     <View style={styles.statCard}><Text style={styles.statNumber}>{Object.keys(chatMessages).length}</Text><Text style={styles.statLabel}>Chats</Text></View>
                 </View>
                 <View style={styles.navRow}>
-                    <TouchableOpacity style={styles.navButton} onPress={() => setScreen("home")}><Text style={styles.navText}>💬 Chats</Text></TouchableOpacity>
-                    <TouchableOpacity style={styles.navButton} onPress={() => setScreen("friendRequests")}><Text style={styles.navText}>👥 Requests</Text></TouchableOpacity>
-                    <TouchableOpacity style={styles.navButton} onPress={() => setScreen("findFriends")}><Text style={styles.navText}>🔍 Find</Text></TouchableOpacity>
+                    <TouchableOpacity style={styles.navButton} onPress={() => { setSearchQuery(""); setScreen("home"); }}><Text style={styles.navText}>💬 Chats</Text></TouchableOpacity>
+                    <TouchableOpacity style={styles.navButton} onPress={() => { setSearchQuery(""); setScreen("friendRequests"); }}><Text style={styles.navText}>👥 Requests</Text></TouchableOpacity>
+                    <TouchableOpacity style={styles.navButton} onPress={() => { setSearchQuery(""); setScreen("findFriends"); }}><Text style={styles.navText}>🔍 Find</Text></TouchableOpacity>
                 </View>
             </SafeAreaView>
         );
@@ -1225,7 +1235,17 @@ export default function App() {
                             )}
                         </View>
                     )}
-                    ListEmptyComponent={() => <View style={styles.emptyState}><Text style={styles.emptyText}>No users found</Text></View>}
+                    ListEmptyComponent={() => (
+                        <View style={styles.emptyState}>
+                            {usersLoading ? (
+                                <><ActivityIndicator size="large" color="#3B82F6" /><Text style={styles.emptyText}>Loading users...</Text></>
+                            ) : usersError ? (
+                                <><Text style={styles.emptyText}>Failed to load users</Text><TouchableOpacity onPress={() => { setUsersLoading(true); setUsersError(null); const unsub = getFirestore().collection('users').onSnapshot((snap) => { const u = []; snap.forEach(d => { if (d.id !== currentUser.uid) u.push({ id: d.id, ...d.data() }); }); setAllUsers(u); setUsersLoading(false); }, (e) => { setUsersLoading(false); setUsersError(e.message); }); setTimeout(() => unsub && unsub(), 10000); }}><Text style={styles.linkText}>Tap to retry</Text></TouchableOpacity></>
+                            ) : (
+                                <Text style={styles.emptyText}>No users found</Text>
+                            )}
+                        </View>
+                    )}
                 />
             </SafeAreaView>
         );

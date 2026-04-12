@@ -18,8 +18,10 @@
     },
     "production": {
       "autoIncrement": true,
+      "node": "24.13.0",
+      "channel": "production",
       "android": {
-        "buildType": "apk"
+        "buildType": "app-bundle"
       }
     }
   },
