@@ -99,6 +99,14 @@ export default function App() {
     const [messageText, setMessageText] = useState("");
     const flatListRef = useRef(null);
 
+    // Call State
+    const [callState, setCallState] = useState(null);
+    const [callPartner, setCallPartner] = useState(null);
+    const [callDoc, setCallDoc] = useState(null);
+    const [callDuration, setCallDuration] = useState(0);
+    const callTimerRef = useRef(null);
+    const callStateRef = useRef(null);
+
     useEffect(() => {
         if (screen !== "chat" || !selectedFriend || !currentUser) return;
         const chatId = [currentUser.uid, selectedFriend.id].sort().join('_');
@@ -300,6 +308,62 @@ export default function App() {
         return () => unsubscribe();
     }, [currentUser]);
 
+    // ==================== CALL LISTENERS ====================
+
+    useEffect(() => {
+        callStateRef.current = callState;
+    }, [callState]);
+
+    useEffect(() => {
+        if (!currentUser) return;
+        const unsubscribe = getFirestore()
+            .collection('calls')
+            .where('to', '==', currentUser.uid)
+            .where('status', '==', 'ringing')
+            .onSnapshot((snapshot) => {
+                if (!snapshot.empty && !callStateRef.current) {
+                    const doc = snapshot.docs[0];
+                    const data = doc.data();
+                    setCallState('incoming');
+                    setCallPartner({ id: data.from, fullName: data.fromName });
+                    setCallDoc({ id: doc.id, ...data });
+                }
+            });
+        return () => unsubscribe();
+    }, [currentUser]);
+
+    useEffect(() => {
+        if (!callDoc?.id) return;
+        const unsubscribe = getFirestore()
+            .collection('calls')
+            .doc(callDoc.id)
+            .onSnapshot((doc) => {
+                if (doc.exists) {
+                    const data = doc.data();
+                    if (data.status === 'active' && callStateRef.current !== 'active') {
+                        setCallState('active');
+                    } else if (data.status === 'ended') {
+                        setCallState(null);
+                        setCallPartner(null);
+                        setCallDoc(null);
+                    }
+                }
+            });
+        return () => unsubscribe();
+    }, [callDoc?.id]);
+
+    useEffect(() => {
+        if (callState === 'active') {
+            callTimerRef.current = setInterval(() => {
+                setCallDuration(prev => prev + 1);
+            }, 1000);
+        } else {
+            if (callTimerRef.current) clearInterval(callTimerRef.current);
+            setCallDuration(0);
+        }
+        return () => { if (callTimerRef.current) clearInterval(callTimerRef.current); };
+    }, [callState]);
+
     // ==================== AUTH FUNCTIONS ====================
 
     const handleLogin = async () => {
@@ -475,6 +539,57 @@ export default function App() {
             .add(newMessage);
         setMessageText("");
         setTimeout(() => flatListRef.current?.scrollToEnd({ animated: true }), 100);
+    };
+
+    // ==================== CALL FUNCTIONS ====================
+
+    const initiateCall = async (friend) => {
+        setCallPartner(friend);
+        setCallState('calling');
+        const callDocRef = await getFirestore().collection('calls').add({
+            from: currentUser.uid,
+            fromName: currentUser.fullName,
+            to: friend.id,
+            toName: friend.fullName,
+            status: 'ringing',
+            timestamp: getFirestoreModule().FieldValue.serverTimestamp(),
+        });
+        setCallDoc({ id: callDocRef.id, from: currentUser.uid, to: friend.id });
+    };
+
+    const acceptCall = async () => {
+        if (callDoc) {
+            await getFirestore().collection('calls').doc(callDoc.id).update({ status: 'active' });
+            setCallState('active');
+        }
+    };
+
+    const endCall = async () => {
+        if (callDoc) {
+            try {
+                await getFirestore().collection('calls').doc(callDoc.id).update({ status: 'ended' });
+            } catch (e) { }
+        }
+        setCallState(null);
+        setCallPartner(null);
+        setCallDoc(null);
+    };
+
+    const declineCall = async () => {
+        if (callDoc) {
+            try {
+                await getFirestore().collection('calls').doc(callDoc.id).update({ status: 'ended' });
+            } catch (e) { }
+        }
+        setCallState(null);
+        setCallPartner(null);
+        setCallDoc(null);
+    };
+
+    const formatCallDuration = (seconds) => {
+        const mins = Math.floor(seconds / 60);
+        const secs = seconds % 60;
+        return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
     };
 
     // ==================== TERMS & PRIVACY CONTENT ====================
@@ -719,9 +834,14 @@ export default function App() {
                         </View>
                         <Text style={styles.chatHeaderName}>{selectedFriend.fullName}</Text>
                     </View>
-                    <TouchableOpacity onPress={() => removeFriend(selectedFriend.id, selectedFriend.fullName)}>
-                        <Text style={styles.removeIcon}>⋯</Text>
-                    </TouchableOpacity>
+                    <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                        <TouchableOpacity onPress={() => initiateCall(selectedFriend)} style={{ marginRight: 15 }}>
+                            <Text style={{ color: 'white', fontSize: 22 }}>📞</Text>
+                        </TouchableOpacity>
+                        <TouchableOpacity onPress={() => removeFriend(selectedFriend.id, selectedFriend.fullName)}>
+                            <Text style={styles.removeIcon}>⋯</Text>
+                        </TouchableOpacity>
+                    </View>
                 </View>
                 <FlatList
                     ref={flatListRef}
@@ -765,11 +885,11 @@ export default function App() {
                     <Text style={styles.headerTitle}>Friend Requests</Text>
                     <View style={{ width: 50 }} />
                 </View>
-                {friendRequests.length === 0 ? (
+                {friendRequests.filter(r => r.to === currentUser.uid).length === 0 ? (
                     <View style={styles.emptyState}><Text style={styles.emptyText}>No pending requests</Text></View>
                 ) : (
                     <FlatList
-                        data={friendRequests}
+                        data={friendRequests.filter(r => r.to === currentUser.uid)}
                         keyExtractor={item => item.id}
                         renderItem={({ item }) => (
                             <View style={styles.requestCard}>
@@ -951,6 +1071,45 @@ export default function App() {
         );
     }
 
+    // ==================== CALL SCREEN ====================
+    if (callState && callPartner) {
+        return (
+            <SafeAreaView style={styles.callContainer}>
+                <StatusBar backgroundColor="#1a1a2e" barStyle="light-content" />
+                <View style={styles.callContent}>
+                    <View style={[styles.callAvatar, { backgroundColor: generateUserColor(callPartner.id) }]}>
+                        <Text style={styles.callAvatarText}>{callPartner.fullName?.charAt(0)}</Text>
+                    </View>
+                    <Text style={styles.callName}>{callPartner.fullName}</Text>
+                    <Text style={styles.callStatus}>
+                        {callState === 'calling' ? '📞 Calling...' : callState === 'incoming' ? '📲 Incoming Call' : formatCallDuration(callDuration)}
+                    </Text>
+                    {callState === 'active' && <Text style={styles.callActiveLabel}>Connected</Text>}
+                </View>
+                <View style={styles.callActions}>
+                    {callState === 'incoming' && (
+                        <View style={styles.callButtonsRow}>
+                            <TouchableOpacity style={styles.declineCallBtn} onPress={declineCall}>
+                                <Text style={styles.callBtnIcon}>✕</Text>
+                                <Text style={styles.callBtnLabel}>Decline</Text>
+                            </TouchableOpacity>
+                            <TouchableOpacity style={styles.acceptCallBtn} onPress={acceptCall}>
+                                <Text style={styles.callBtnIcon}>📞</Text>
+                                <Text style={styles.callBtnLabel}>Accept</Text>
+                            </TouchableOpacity>
+                        </View>
+                    )}
+                    {(callState === 'calling' || callState === 'active') && (
+                        <TouchableOpacity style={styles.endCallBtn} onPress={endCall}>
+                            <Text style={styles.callBtnIcon}>✕</Text>
+                            <Text style={styles.callBtnLabel}>End Call</Text>
+                        </TouchableOpacity>
+                    )}
+                </View>
+            </SafeAreaView>
+        );
+    }
+
     return null;
 }
 
@@ -1090,4 +1249,19 @@ const styles = StyleSheet.create({
     termsTitle: { fontSize: 24, fontWeight: "bold", color: "#3B82F6", marginBottom: 20, textAlign: "center" },
     termsHeading: { fontSize: 18, fontWeight: "bold", marginTop: 15, marginBottom: 10, color: "#333" },
     termsText: { fontSize: 14, color: "#666", marginBottom: 10, lineHeight: 22 },
+    // Call Styles
+    callContainer: { flex: 1, backgroundColor: "#1a1a2e", justifyContent: "space-between" },
+    callContent: { flex: 1, justifyContent: "center", alignItems: "center", paddingTop: 60 },
+    callAvatar: { width: 120, height: 120, borderRadius: 60, justifyContent: "center", alignItems: "center", marginBottom: 25 },
+    callAvatarText: { color: "white", fontSize: 52, fontWeight: "bold" },
+    callName: { color: "white", fontSize: 28, fontWeight: "bold", marginBottom: 10 },
+    callStatus: { color: "rgba(255,255,255,0.7)", fontSize: 18, marginBottom: 5 },
+    callActiveLabel: { color: "#4CAF50", fontSize: 14, fontWeight: "600", marginTop: 5 },
+    callActions: { paddingBottom: 60, alignItems: "center" },
+    callButtonsRow: { flexDirection: "row", justifyContent: "center", width: "100%" },
+    declineCallBtn: { backgroundColor: "#ef4444", width: 75, height: 75, borderRadius: 38, justifyContent: "center", alignItems: "center", marginHorizontal: 30 },
+    acceptCallBtn: { backgroundColor: "#22c55e", width: 75, height: 75, borderRadius: 38, justifyContent: "center", alignItems: "center", marginHorizontal: 30 },
+    endCallBtn: { backgroundColor: "#ef4444", width: 75, height: 75, borderRadius: 38, justifyContent: "center", alignItems: "center" },
+    callBtnIcon: { color: "white", fontSize: 28, fontWeight: "bold" },
+    callBtnLabel: { color: "white", fontSize: 11, marginTop: 3, fontWeight: "600" },
 });
