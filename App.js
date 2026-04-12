@@ -1182,7 +1182,6 @@ export default function App() {
                             <Text style={styles.statsText}>{friendsList.length} friends • {pendingCount} requests</Text>
                         </View>
                     </TouchableOpacity>
-                    <TouchableOpacity onPress={handleLogout}><Text style={styles.logoutText}>Logout</Text></TouchableOpacity>
                 </View>
                 <View style={styles.statsRow}>
                     <View style={styles.statCard}><Text style={styles.statNumber}>{friendsList.length}</Text><Text style={styles.statLabel}>Friends</Text></View>
