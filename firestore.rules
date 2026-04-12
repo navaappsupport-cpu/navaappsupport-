@@ -5,7 +5,8 @@ service cloud.firestore {
     // Users can read/write their own user document
     match /users/{userId} {
       allow read: if request.auth != null;
-      allow write: if request.auth != null && request.auth.uid == userId;
+      allow create: if request.auth != null;
+      allow update, delete: if request.auth != null && request.auth.uid == userId;
     }
 
     // Messages: authenticated users can read/write in conversations they're part of

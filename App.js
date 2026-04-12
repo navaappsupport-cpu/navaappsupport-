@@ -211,28 +211,32 @@ export default function App() {
                 try {
                     if (user) {
                         // Always ensure user document exists in Firestore
-                        const userDoc = await getFirestore().collection('users').doc(user.uid).get();
-                        const userData = {
-                            uid: user.uid,
-                            email: user.email,
-                        };
+                        const userRef = getFirestore().collection('users').doc(user.uid);
+                        const userDoc = await userRef.get();
                         if (userDoc.exists) {
-                            // Update last login but keep existing data
-                            await getFirestore().collection('users').doc(user.uid).set({
-                                ...userData,
+                            const existingData = userDoc.data();
+                            // Ensure fullName exists, update lastLogin
+                            const updates = {
+                                uid: user.uid,
+                                email: user.email,
                                 lastLogin: getFirestoreModule().FieldValue.serverTimestamp(),
-                            }, { merge: true });
-                            setCurrentUser({ uid: user.uid, ...userDoc.data() });
+                            };
+                            if (!existingData.fullName) {
+                                updates.fullName = user.displayName || user.email?.split('@')[0] || "User";
+                            }
+                            await userRef.set(updates, { merge: true });
+                            setCurrentUser({ uid: user.uid, ...existingData, ...updates, lastLogin: undefined });
                         } else {
                             // Create new user document
                             const newUserData = {
-                                ...userData,
+                                uid: user.uid,
+                                email: user.email,
                                 fullName: user.displayName || user.email?.split('@')[0] || "User",
                                 bio: "New member",
                                 createdAt: getFirestoreModule().FieldValue.serverTimestamp(),
                                 lastLogin: getFirestoreModule().FieldValue.serverTimestamp(),
                             };
-                            await getFirestore().collection('users').doc(user.uid).set(newUserData);
+                            await userRef.set(newUserData);
                             setCurrentUser({ uid: user.uid, ...newUserData });
                         }
                         setScreen("dashboard");
