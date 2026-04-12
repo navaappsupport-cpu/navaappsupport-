@@ -4,3 +4,6 @@ AppData/
 .expo/
 dist/
 build/
+android/build/
+android/.gradle/
+android/.kotlin/
