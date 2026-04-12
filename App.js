@@ -6,6 +6,7 @@ import {
     Text,
     TextInput,
     TouchableOpacity,
+    Pressable,
     ScrollView,
     FlatList,
     StatusBar,
@@ -165,6 +166,8 @@ export default function App() {
     const [searchQuery, setSearchQuery] = useState("");
     const [viewProfileUser, setViewProfileUser] = useState(null);
     const [userPreviewReturnScreen, setUserPreviewReturnScreen] = useState("findFriends");
+    const [chatMenuVisible, setChatMenuVisible] = useState(false);
+    const [chatMoreMenuVisible, setChatMoreMenuVisible] = useState(false);
 
     // Modals
     const [termsModalVisible, setTermsModalVisible] = useState(false);
@@ -803,6 +806,28 @@ export default function App() {
         setMessageText("");
     };
 
+    const handleExportChat = () => {
+        if (!selectedFriend || !currentUser) return;
+        const chatId = [currentUser.uid, selectedFriend.id].sort().join('_');
+        const messages = chatMessages[chatId] || [];
+        Alert.alert("Export Chat", `Export feature will be added soon.\nMessages available: ${messages.length}`);
+    };
+
+    const openChatMainMenu = () => {
+        setChatMoreMenuVisible(false);
+        setChatMenuVisible(true);
+    };
+
+    const openChatMoreMenu = () => {
+        setChatMenuVisible(false);
+        setChatMoreMenuVisible(true);
+    };
+
+    const closeChatMenus = () => {
+        setChatMenuVisible(false);
+        setChatMoreMenuVisible(false);
+    };
+
     // ==================== CALL FUNCTIONS ====================
 
     const cleanupWebRTC = () => {
@@ -1285,7 +1310,7 @@ export default function App() {
                             <TouchableOpacity onPress={() => initiateCall(selectedFriend)} style={{ marginRight: 15 }}>
                                 <Text style={{ color: 'white', fontSize: 22 }}>📞</Text>
                             </TouchableOpacity>
-                            <TouchableOpacity onPress={() => removeFriend(selectedFriend.id, selectedFriend.fullName)}>
+                            <TouchableOpacity onPress={openChatMainMenu}>
                                 <Text style={styles.removeIcon}>⋯</Text>
                             </TouchableOpacity>
                         </View>
@@ -1346,6 +1371,56 @@ export default function App() {
                             <Text style={styles.sendText}>{editingMessage ? "Save" : "Send"}</Text>
                         </TouchableOpacity>
                     </View>
+
+                    <Modal visible={chatMenuVisible} transparent animationType="fade" onRequestClose={closeChatMenus}>
+                        <Pressable style={styles.chatMenuOverlay} onPress={closeChatMenus}>
+                            <Pressable style={styles.chatMenuPanel} onPress={() => { }}>
+                                <TouchableOpacity style={styles.chatMenuItem} onPress={() => { closeChatMenus(); Alert.alert("Add to contacts", "This option will be added soon."); }}>
+                                    <Text style={styles.chatMenuItemText}>Add to contacts</Text>
+                                </TouchableOpacity>
+                                <TouchableOpacity style={styles.chatMenuItem} onPress={() => { closeChatMenus(); messageInputRef.current?.focus(); }}>
+                                    <Text style={styles.chatMenuItemText}>Search</Text>
+                                </TouchableOpacity>
+                                <TouchableOpacity style={styles.chatMenuItem} onPress={() => { closeChatMenus(); reportUser(selectedFriend.id, selectedFriend.fullName); }}>
+                                    <Text style={styles.chatMenuItemText}>Report</Text>
+                                </TouchableOpacity>
+                                <TouchableOpacity style={styles.chatMenuItem} onPress={() => { closeChatMenus(); blockUser(selectedFriend.id, selectedFriend.fullName); }}>
+                                    <Text style={styles.chatMenuItemText}>Block</Text>
+                                </TouchableOpacity>
+                                <TouchableOpacity style={styles.chatMenuItem} onPress={() => { closeChatMenus(); Alert.alert("Mute notifications", "Mute notifications option will be added soon."); }}>
+                                    <Text style={styles.chatMenuItemText}>Mute notifications</Text>
+                                </TouchableOpacity>
+                                <TouchableOpacity style={styles.chatMenuItem} onPress={() => { closeChatMenus(); Alert.alert("Disappearing messages", "Disappearing messages is Off"); }}>
+                                    <Text style={styles.chatMenuItemText}>Disappearing messages</Text>
+                                </TouchableOpacity>
+                                <TouchableOpacity style={styles.chatMenuItem} onPress={() => { closeChatMenus(); Alert.alert("Chat theme", "Chat theme option will be added soon."); }}>
+                                    <Text style={styles.chatMenuItemText}>Chat theme</Text>
+                                </TouchableOpacity>
+                                <TouchableOpacity style={styles.chatMenuItem} onPress={openChatMoreMenu}>
+                                    <Text style={styles.chatMenuItemText}>More</Text>
+                                </TouchableOpacity>
+                            </Pressable>
+                        </Pressable>
+                    </Modal>
+
+                    <Modal visible={chatMoreMenuVisible} transparent animationType="fade" onRequestClose={closeChatMenus}>
+                        <Pressable style={styles.chatMenuOverlay} onPress={closeChatMenus}>
+                            <Pressable style={styles.chatMenuPanel} onPress={() => { }}>
+                                <TouchableOpacity style={styles.chatMenuItem} onPress={() => { closeChatMenus(); setUserPreviewReturnScreen("chat"); setViewProfileUser(selectedFriend); setScreen("userPreview"); }}>
+                                    <Text style={styles.chatMenuItemText}>Media, links, and docs</Text>
+                                </TouchableOpacity>
+                                <TouchableOpacity style={styles.chatMenuItem} onPress={() => { closeChatMenus(); clearChat(selectedFriend.id, selectedFriend.fullName); }}>
+                                    <Text style={styles.chatMenuItemText}>Clear chat</Text>
+                                </TouchableOpacity>
+                                <TouchableOpacity style={styles.chatMenuItem} onPress={() => { closeChatMenus(); handleExportChat(); }}>
+                                    <Text style={styles.chatMenuItemText}>Export chat</Text>
+                                </TouchableOpacity>
+                                <TouchableOpacity style={styles.chatMenuItem} onPress={() => { closeChatMenus(); Alert.alert("Add shortcut", "Add shortcut option will be added soon."); }}>
+                                    <Text style={styles.chatMenuItemText}>Add shortcut</Text>
+                                </TouchableOpacity>
+                            </Pressable>
+                        </Pressable>
+                    </Modal>
                 </KeyboardAvoidingView>
             </SafeAreaView>
         );
@@ -1782,6 +1857,10 @@ const styles = StyleSheet.create({
     chatAvatarText: { color: "white", fontSize: 18, fontWeight: "bold" },
     chatHeaderName: { color: "white", fontSize: 16, fontWeight: "bold", marginLeft: 10 },
     removeIcon: { color: "white", fontSize: 20, fontWeight: "bold", padding: 5 },
+    chatMenuOverlay: { flex: 1, backgroundColor: "rgba(0,0,0,0.15)", justifyContent: "flex-start", alignItems: "flex-end", paddingTop: 95, paddingRight: 14 },
+    chatMenuPanel: { backgroundColor: "white", borderRadius: 16, minWidth: 245, paddingVertical: 6, shadowColor: "#000", shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.2, shadowRadius: 10, elevation: 8 },
+    chatMenuItem: { paddingHorizontal: 20, paddingVertical: 14 },
+    chatMenuItemText: { fontSize: 18, color: "#111827" },
     messagesList: { flex: 1 },
     messagesContainer: { padding: 15 },
     messageRow: { marginBottom: 15, alignItems: "flex-end" },
