@@ -1,0 +1,6 @@
+# Exclude problematic directories
+AppData/
+.git/
+.expo/
+dist/
+build/
