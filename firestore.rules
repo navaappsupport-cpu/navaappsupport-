@@ -89,22 +89,47 @@ service cloud.firestore {
     match /users/{userId} {
       allow read: if signedIn();
       allow create: if isOwnUser(userId)
-        && request.resource.data.keys().hasOnly(['uid', 'email', 'fullName', 'bio', 'photoUri', 'createdAt', 'lastLogin'])
+        && request.resource.data.keys().hasOnly(['uid', 'email', 'fullName', 'bio', 'photoUri', 'createdAt', 'lastLogin', 'country', 'city'])
         && request.resource.data.uid == request.auth.uid
         && request.resource.data.email == userEmail()
         && validName(request.resource.data.fullName)
         && (!('bio' in request.resource.data) || validOptionalString(request.resource.data.bio, 160))
-        && (!('photoUri' in request.resource.data) || validOptionalString(request.resource.data.photoUri, 900000));
+        && (!('photoUri' in request.resource.data) || validOptionalString(request.resource.data.photoUri, 900000))
+        && (!('country' in request.resource.data) || validOptionalString(request.resource.data.country, 100))
+        && (!('city' in request.resource.data) || validOptionalString(request.resource.data.city, 100));
       allow update: if isOwnUser(userId)
-        && request.resource.data.keys().hasOnly(['uid', 'email', 'fullName', 'bio', 'photoUri', 'createdAt', 'lastLogin'])
+        && request.resource.data.keys().hasOnly(['uid', 'email', 'fullName', 'bio', 'photoUri', 'createdAt', 'lastLogin', 'country', 'city'])
         && request.resource.data.uid == resource.data.uid
         && request.resource.data.uid == request.auth.uid
         && request.resource.data.email == resource.data.email
         && request.resource.data.email == userEmail()
         && validName(request.resource.data.fullName)
         && (!('bio' in request.resource.data) || validOptionalString(request.resource.data.bio, 160))
-        && (!('photoUri' in request.resource.data) || validOptionalString(request.resource.data.photoUri, 900000));
+        && (!('photoUri' in request.resource.data) || validOptionalString(request.resource.data.photoUri, 900000))
+        && (!('country' in request.resource.data) || validOptionalString(request.resource.data.country, 100))
+        && (!('city' in request.resource.data) || validOptionalString(request.resource.data.city, 100));
       allow delete: if isOwnUser(userId);
+    }
+
+    match /privateProfiles/{userId} {
+      allow read, delete: if isOwnUser(userId);
+      allow create, update: if isOwnUser(userId)
+        && request.resource.data.keys().hasOnly(['phone'])
+        && (!('phone' in request.resource.data) || validOptionalString(request.resource.data.phone, 30));
+    }
+
+    match /statuses/{ownerId} {
+      allow read: if signedIn() && (isOwnUser(ownerId) || (areFriends(ownerId, request.auth.uid) && !isBlocked(ownerId, request.auth.uid)));
+      allow create, update: if isOwnUser(ownerId)
+        && request.resource.data.keys().hasOnly(['ownerId', 'ownerName', 'ownerPhotoUri', 'mediaType', 'mediaUri', 'storagePath', 'durationMs', 'createdAt', 'expiresAt'])
+        && request.resource.data.ownerId == request.auth.uid
+        && validName(request.resource.data.ownerName)
+        && request.resource.data.mediaType in ['image', 'video']
+        && (!('ownerPhotoUri' in request.resource.data) || validOptionalString(request.resource.data.ownerPhotoUri, 900000))
+        && (!('mediaUri' in request.resource.data) || validOptionalString(request.resource.data.mediaUri, 900000))
+        && (!('storagePath' in request.resource.data) || validOptionalString(request.resource.data.storagePath, 300))
+        && (!('durationMs' in request.resource.data) || (request.resource.data.durationMs is int && request.resource.data.durationMs >= 2000 && request.resource.data.durationMs <= 60000));
+      allow delete: if isOwnUser(ownerId);
     }
 
     match /messages/{chatId} {

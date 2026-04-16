@@ -1,12 +1,12 @@
 {
   "expo": {
-    "name": "ChatConnect",
-    "slug": "ChatConnect",
+    "name": "NavaApp.support",
+    "slug": "navaappsupport",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
-    "newArchEnabled": true,
+    "newArchEnabled": false,
     "splash": {
       "image": "./assets/splash-icon.png",
       "resizeMode": "contain",
@@ -20,21 +20,18 @@
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#ffffff"
       },
-      "edgeToEdgeEnabled": true,
-      "package": "com.chatconnect.app"
+      "softwareKeyboardLayoutMode": "resize",
+      "package": "com.navaapp.app"
     },
     "web": {
       "favicon": "./assets/favicon.png"
     },
-    "updates": {
-      "url": "https://u.expo.dev/8dd683b4-26e4-473a-bffd-44613bc7cf1c"
-    },
     "runtimeVersion": "1.0.0",
     "extra": {
       "eas": {
-        "projectId": "8dd683b4-26e4-473a-bffd-44613bc7cf1c"
+        "projectId": "9c02f3e9-bd8b-4906-bb7c-44794b268d5e"
       }
     },
-    "owner": "chatconnect"
+    "owner": "navaapplication"
   }
 }

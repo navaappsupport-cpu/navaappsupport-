@@ -1,5 +1,8 @@
 import React, { useState, useEffect, useRef } from "react";
 import * as ImagePicker from "expo-image-picker";
+import * as Location from "expo-location";
+import * as Contacts from "expo-contacts";
+import { Video, ResizeMode } from "expo-av";
 import {
     SafeAreaView,
     View,
@@ -16,14 +19,21 @@ import {
     Image,
     Share,
     ActivityIndicator,
+    Keyboard,
     KeyboardAvoidingView,
     Platform,
     PermissionsAndroid,
 } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 
-// Initialize Firebase App FIRST before any other Firebase modules
-require('@react-native-firebase/app');
+// Initialize Firebase app before any other Firebase modules.
+let firebaseAppInitError = null;
+try {
+    require('@react-native-firebase/app');
+} catch (error) {
+    firebaseAppInitError = error;
+    console.error("Firebase app module failed to load", error);
+}
 
 let firebaseAuth = null;
 let firebaseFirestore = null;
@@ -41,10 +51,17 @@ const getAuth = () => {
     return firebaseAuth();
 };
 
+
 const getFirestore = () => {
     if (!firebaseFirestore) {
         try {
             firebaseFirestore = require('@react-native-firebase/firestore').default;
+            // Set Firestore to use the Berlin region (europe-west3)
+            firebaseFirestore().settings({
+                host: 'europe-west3-firestore.googleapis.com',
+                ssl: true,
+                persistence: true,
+            });
         } catch (error) {
             console.error("Firebase firestore module failed to load", error);
             throw error;
@@ -112,6 +129,11 @@ const AVATAR_COLORS = [
     "#E91E63", "#009688", "#3F51B5", "#FF5722", "#607D8B",
 ];
 
+const STATUS_PHOTO_DURATION_MS = 3000;
+const STATUS_MIN_VIDEO_MS = 2000;
+const STATUS_MAX_VIDEO_MS = 60000;
+const STATUS_LIFETIME_MS = 24 * 60 * 60 * 1000;
+
 export default function App() {
     const [isLoading, setIsLoading] = useState(true);
     const [currentUser, setCurrentUser] = useState(null);
@@ -134,6 +156,7 @@ export default function App() {
     // Profile State
     const [editingProfile, setEditingProfile] = useState(false);
     const [editName, setEditName] = useState("");
+    const [editPhone, setEditPhone] = useState("");
 
     // Chat State
     const [chatMessages, setChatMessages] = useState({});
@@ -173,6 +196,8 @@ export default function App() {
     const [usersError, setUsersError] = useState(null);
     const [blockedUsers, setBlockedUsers] = useState([]);
     const [blockedByUsers, setBlockedByUsers] = useState([]);
+    const [deviceContactEmails, setDeviceContactEmails] = useState([]);
+    const [userCountry, setUserCountry] = useState("");
 
     // UI State
     const [searchQuery, setSearchQuery] = useState("");
@@ -180,6 +205,13 @@ export default function App() {
     const [userPreviewReturnScreen, setUserPreviewReturnScreen] = useState("findFriends");
     const [chatMenuVisible, setChatMenuVisible] = useState(false);
     const [chatMoreMenuVisible, setChatMoreMenuVisible] = useState(false);
+    const [statusFeed, setStatusFeed] = useState([]);
+    const [statusViewerItems, setStatusViewerItems] = useState([]);
+    const [statusViewerIndex, setStatusViewerIndex] = useState(0);
+    const [statusViewerUri, setStatusViewerUri] = useState("");
+    const [statusViewerLoading, setStatusViewerLoading] = useState(false);
+    const [statusViewerReturnScreen, setStatusViewerReturnScreen] = useState("dashboard");
+    const statusTimerRef = useRef(null);
 
     // Modals
     const [termsModalVisible, setTermsModalVisible] = useState(false);
@@ -252,7 +284,15 @@ export default function App() {
 
     const getProfilePhotoStoragePath = (userId) => `profilePhotos/${userId}/avatar.jpg`;
 
+    const getStatusStoragePath = (userId, extension = "jpg") => `statuses/${userId}/status.${extension}`;
+
     const normalizeUploadUri = (uri) => uri?.startsWith("file://") ? uri.replace("file://", "") : uri;
+
+    const getFileExtension = (value, fallback) => {
+        const cleanValue = value?.split("?")[0] || "";
+        const extension = cleanValue.split(".").pop()?.toLowerCase();
+        return extension && extension.length <= 5 ? extension : fallback;
+    };
 
     const saveProfilePhotoFallback = async (asset) => {
         const fallbackUri = asset.base64 ? `data:${asset.mimeType || 'image/jpeg'};base64,${asset.base64}` : asset.uri;
@@ -274,11 +314,11 @@ export default function App() {
         setEditingMessage(null);
         setMessageText("");
         if (screen === "register") setScreen("welcome");
-        else if (screen === "home") setScreen("dashboard");
-        else if (screen === "chat") setScreen("home");
+        else if (screen === "chat") setScreen("dashboard");
         else if (screen === "friendRequests") setScreen("dashboard");
         else if (screen === "profile") setScreen("dashboard");
         else if (screen === "findFriends") setScreen("dashboard");
+        else if (screen === "statusViewer") setScreen(statusViewerReturnScreen || "dashboard");
         else if (screen === "userPreview") setScreen(userPreviewReturnScreen || "findFriends");
         else setScreen("dashboard");
     };
@@ -332,8 +372,147 @@ export default function App() {
         }
     };
 
+    const closeStatusViewer = () => {
+        if (statusTimerRef.current) {
+            clearTimeout(statusTimerRef.current);
+            statusTimerRef.current = null;
+        }
+        setStatusViewerUri("");
+        setStatusViewerLoading(false);
+        setStatusViewerItems([]);
+        setStatusViewerIndex(0);
+        setScreen(statusViewerReturnScreen || "dashboard");
+    };
+
+    const advanceStatusViewer = () => {
+        if (statusTimerRef.current) {
+            clearTimeout(statusTimerRef.current);
+            statusTimerRef.current = null;
+        }
+
+        setStatusViewerUri("");
+        if (statusViewerIndex < statusViewerItems.length - 1) {
+            setStatusViewerIndex(prev => prev + 1);
+            return;
+        }
+
+        closeStatusViewer();
+    };
+
+    const goToPreviousStatus = () => {
+        if (statusTimerRef.current) {
+            clearTimeout(statusTimerRef.current);
+            statusTimerRef.current = null;
+        }
+
+        if (statusViewerIndex > 0) {
+            setStatusViewerUri("");
+            setStatusViewerIndex(prev => prev - 1);
+            return;
+        }
+
+        closeStatusViewer();
+    };
+
+    const openStatusViewer = (items, startIndex = 0, returnScreen = screen) => {
+        if (!items?.length) {
+            return;
+        }
+
+        setStatusViewerReturnScreen(returnScreen);
+        setStatusViewerItems(items);
+        setStatusViewerIndex(startIndex);
+        setStatusViewerUri("");
+        setScreen("statusViewer");
+    };
+
+    const pickStatusMedia = async () => {
+        try {
+            const result = await ImagePicker.launchImageLibraryAsync({
+                mediaTypes: ['images', 'videos'],
+                quality: 0.7,
+                base64: true,
+            });
+
+            if (result.canceled || !result.assets?.length) {
+                return;
+            }
+
+            const asset = result.assets[0];
+            if (!asset.uri) {
+                Alert.alert("Error", "Selected media is invalid.");
+                return;
+            }
+
+            const mediaType = asset.type === "video" ? "video" : "image";
+            const durationMs = mediaType === "video" ? (asset.duration || 0) : STATUS_PHOTO_DURATION_MS;
+
+            if (mediaType === "video" && (durationMs < STATUS_MIN_VIDEO_MS || durationMs > STATUS_MAX_VIDEO_MS)) {
+                Alert.alert("Invalid video", "Status videos must be between 2 seconds and 1 minute.");
+                return;
+            }
+
+            const existingStatusDoc = await getFirestore().collection('statuses').doc(currentUser.uid).get();
+            const existingStatus = existingStatusDoc.exists ? existingStatusDoc.data() : null;
+
+            let storagePath = "";
+            let mediaUri = "";
+
+            if (mediaType === "image" && asset.base64) {
+                mediaUri = `data:${asset.mimeType || 'image/jpeg'};base64,${asset.base64}`;
+            }
+
+            try {
+                const extension = getFileExtension(asset.fileName || asset.uri, mediaType === "video" ? "mp4" : "jpg");
+                storagePath = getStatusStoragePath(currentUser.uid, extension);
+                const storageRef = getStorage().ref(storagePath);
+                await storageRef.putFile(normalizeUploadUri(asset.uri));
+                mediaUri = "";
+            } catch (storageError) {
+                console.warn("Status storage upload failed", storageError);
+                if (mediaType === "video") {
+                    Alert.alert("Upload failed", "Video statuses require Firebase Storage to be available.");
+                    return;
+                }
+                if (!mediaUri) {
+                    Alert.alert("Upload failed", "Could not upload your photo status.");
+                    return;
+                }
+            }
+
+            await getFirestore().collection('statuses').doc(currentUser.uid).set({
+                ownerId: currentUser.uid,
+                ownerName: currentUser.fullName,
+                ownerPhotoUri: currentUser.photoUri || "",
+                mediaType,
+                mediaUri,
+                storagePath,
+                durationMs,
+                createdAt: getFirestoreModule().FieldValue.serverTimestamp(),
+                expiresAt: new Date(Date.now() + STATUS_LIFETIME_MS),
+            });
+
+            if (existingStatus?.storagePath && existingStatus.storagePath !== storagePath) {
+                getStorage().ref(existingStatus.storagePath).delete().catch(() => { });
+            }
+
+            Alert.alert("Success", "Status shared with your friends.");
+        } catch (error) {
+            console.error("Status upload failed", error);
+            Alert.alert("Error", error.message || "Could not share status.");
+        }
+    };
+
     // ==================== FIREBASE AUTH STATE ====================
     useEffect(() => {
+        if (firebaseAppInitError) {
+            setStartupError(
+                "Firebase native modules are unavailable. Use an Android/iOS development build (not Expo Go), then restart the app."
+            );
+            setIsLoading(false);
+            return () => { };
+        }
+
         let unsubscribe = null;
         try {
             unsubscribe = getAuth().onAuthStateChanged(async (user) => {
@@ -341,7 +520,10 @@ export default function App() {
                     if (user) {
                         // Always ensure user document exists in Firestore
                         const userRef = getFirestore().collection('users').doc(user.uid);
+                        const privateProfileRef = getFirestore().collection('privateProfiles').doc(user.uid);
                         const userDoc = await userRef.get();
+                        const privateProfileDoc = await privateProfileRef.get();
+                        const privateProfileData = privateProfileDoc.exists ? privateProfileDoc.data() : {};
                         if (userDoc.exists) {
                             const existingData = userDoc.data();
                             // Ensure fullName exists, update lastLogin
@@ -354,7 +536,7 @@ export default function App() {
                                 updates.fullName = user.displayName || user.email?.split('@')[0] || "User";
                             }
                             await userRef.set(updates, { merge: true });
-                            setCurrentUser({ uid: user.uid, ...existingData, ...updates, lastLogin: undefined });
+                            setCurrentUser({ uid: user.uid, ...existingData, ...updates, ...privateProfileData, lastLogin: undefined });
                         } else {
                             // Create new user document
                             const newUserData = {
@@ -366,7 +548,7 @@ export default function App() {
                                 lastLogin: getFirestoreModule().FieldValue.serverTimestamp(),
                             };
                             await userRef.set(newUserData);
-                            setCurrentUser({ uid: user.uid, ...newUserData });
+                            setCurrentUser({ uid: user.uid, ...newUserData, ...privateProfileData });
                         }
                         setScreen("dashboard");
                     } else {
@@ -389,6 +571,53 @@ export default function App() {
         }
         return () => unsubscribe && unsubscribe();
     }, [startupRetryCount]);
+
+    // ==================== LOAD DEVICE CONTACTS & LOCATION ====================
+
+    useEffect(() => {
+        if (!currentUser) return;
+
+        // Load device contacts to match emails
+        (async () => {
+            try {
+                const { status } = await Contacts.requestPermissionsAsync();
+                if (status === 'granted') {
+                    const { data } = await Contacts.getContactsAsync({
+                        fields: [Contacts.Fields.Emails, Contacts.Fields.PhoneNumbers],
+                    });
+                    const emails = [];
+                    data.forEach(c => {
+                        if (c.emails) c.emails.forEach(e => emails.push(e.email?.toLowerCase()));
+                    });
+                    setDeviceContactEmails(emails.filter(Boolean));
+                }
+            } catch (e) {
+                console.warn('Contacts load error:', e);
+            }
+        })();
+
+        // Get user location and store country
+        (async () => {
+            try {
+                const { status } = await Location.requestForegroundPermissionsAsync();
+                if (status !== 'granted') return;
+                const loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Low });
+                const [geo] = await Location.reverseGeocodeAsync({
+                    latitude: loc.coords.latitude,
+                    longitude: loc.coords.longitude,
+                });
+                if (geo?.country) {
+                    setUserCountry(geo.country);
+                    await getFirestore().collection('users').doc(currentUser.uid).update({
+                        country: geo.country,
+                        city: geo.city || "",
+                    });
+                }
+            } catch (e) {
+                console.warn('Location error:', e);
+            }
+        })();
+    }, [currentUser]);
 
     // ==================== FIREBASE LISTENERS ====================
 
@@ -478,6 +707,52 @@ export default function App() {
     }, [currentUser]);
 
     useEffect(() => {
+        if (!currentUser) {
+            setStatusFeed([]);
+            return;
+        }
+
+        const ownerIds = [
+            currentUser.uid,
+            ...friendsList
+                .filter(friend => !isBlockedRelationship(friend.id))
+                .map(friend => friend.id),
+        ];
+        const uniqueOwnerIds = [...new Set(ownerIds)];
+
+        const unsubscribers = uniqueOwnerIds.map((ownerId) => {
+            return getFirestore()
+                .collection('statuses')
+                .doc(ownerId)
+                .onSnapshot((doc) => {
+                    setStatusFeed((prev) => {
+                        const next = prev.filter(item => item.ownerId !== ownerId);
+
+                        if (doc.exists) {
+                            const data = { id: doc.id, ...doc.data() };
+                            const expiresAtMs = data.expiresAt?.toDate?.()?.getTime?.() || (data.expiresAt ? new Date(data.expiresAt).getTime() : 0);
+                            if (!expiresAtMs || expiresAtMs > Date.now()) {
+                                next.push(data);
+                            }
+                        }
+
+                        return next.sort((a, b) => {
+                            if (a.ownerId === currentUser.uid && b.ownerId !== currentUser.uid) return -1;
+                            if (a.ownerId !== currentUser.uid && b.ownerId === currentUser.uid) return 1;
+                            const aTime = a.createdAt?.toDate?.()?.getTime?.() || 0;
+                            const bTime = b.createdAt?.toDate?.()?.getTime?.() || 0;
+                            return bTime - aTime;
+                        });
+                    });
+                }, () => {
+                    setStatusFeed((prev) => prev.filter(item => item.ownerId !== ownerId));
+                });
+        });
+
+        return () => unsubscribers.forEach(unsub => unsub());
+    }, [currentUser, friendsList, blockedUsers, blockedByUsers]);
+
+    useEffect(() => {
         if (selectedFriend && isBlockedRelationship(selectedFriend.id) && screen === "chat") {
             Alert.alert("Access blocked", "You can no longer message this user.");
             goBack();
@@ -555,6 +830,92 @@ export default function App() {
 
         return () => clearTimeout(focusTimer);
     }, [screen, selectedFriend]);
+
+    // Scroll chat to bottom when keyboard appears
+    useEffect(() => {
+        if (screen !== "chat") return;
+        const showEvent = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
+        const sub = Keyboard.addListener(showEvent, () => {
+            setTimeout(() => flatListRef.current?.scrollToEnd({ animated: true }), 100);
+        });
+        return () => sub.remove();
+    }, [screen]);
+
+    useEffect(() => {
+        let cancelled = false;
+
+        if (screen !== "statusViewer") {
+            return undefined;
+        }
+
+        const currentStatus = statusViewerItems[statusViewerIndex];
+        if (!currentStatus) {
+            setScreen(statusViewerReturnScreen || "dashboard");
+            return undefined;
+        }
+
+        const loadStatusMedia = async () => {
+            setStatusViewerLoading(true);
+            setStatusViewerUri("");
+
+            try {
+                if (currentStatus.mediaUri) {
+                    if (!cancelled) {
+                        setStatusViewerUri(currentStatus.mediaUri);
+                    }
+                    return;
+                }
+
+                const url = await getStorage().ref(currentStatus.storagePath).getDownloadURL();
+                if (!cancelled) {
+                    setStatusViewerUri(url);
+                }
+            } catch (error) {
+                console.warn("Status load failed", error);
+                if (!cancelled) {
+                    Alert.alert("Status Error", "Could not load this status.");
+                    advanceStatusViewer();
+                }
+            } finally {
+                if (!cancelled) {
+                    setStatusViewerLoading(false);
+                }
+            }
+        };
+
+        loadStatusMedia();
+
+        return () => {
+            cancelled = true;
+        };
+    }, [screen, statusViewerIndex, statusViewerItems, statusViewerReturnScreen]);
+
+    useEffect(() => {
+        if (statusTimerRef.current) {
+            clearTimeout(statusTimerRef.current);
+            statusTimerRef.current = null;
+        }
+
+        if (screen !== "statusViewer") {
+            return undefined;
+        }
+
+        const currentStatus = statusViewerItems[statusViewerIndex];
+        if (!currentStatus || currentStatus.mediaType !== "image" || !statusViewerUri) {
+            return undefined;
+        }
+
+        statusTimerRef.current = setTimeout(() => {
+            advanceStatusViewer();
+        }, STATUS_PHOTO_DURATION_MS);
+
+        return () => {
+            if (statusTimerRef.current) {
+                clearTimeout(statusTimerRef.current);
+                statusTimerRef.current = null;
+            }
+        };
+    }, [screen, statusViewerIndex, statusViewerItems, statusViewerUri]);
 
     useEffect(() => {
         if (!currentUser || !selectedFriend) {
@@ -806,6 +1167,7 @@ export default function App() {
                                 console.warn('Profile photo delete failed', error);
                             }
                         }
+                        await getFirestore().collection('privateProfiles').doc(user.uid).delete().catch(() => { });
                         await getFirestore().collection('users').doc(user.uid).delete();
                         await user.delete();
                         Alert.alert("Deleted", "Your account has been deleted");
@@ -1374,7 +1736,7 @@ export default function App() {
                 PermissionsAndroid.PERMISSIONS.RECORD_AUDIO,
                 {
                     title: 'Microphone Permission',
-                    message: 'ChatConnect needs microphone access for voice calls.',
+                    message: 'NavaApp needs microphone access for voice calls.',
                     buttonPositive: 'Allow',
                 }
             );
@@ -1591,7 +1953,7 @@ export default function App() {
         <ScrollView style={styles.termsContainer}>
             <Text style={styles.termsTitle}>Terms & Conditions</Text>
             <Text style={styles.termsHeading}>1. Acceptance of Terms</Text>
-            <Text style={styles.termsText}>By creating an account and using ChatConnect, you agree to be bound by these Terms & Conditions.</Text>
+            <Text style={styles.termsText}>By creating an account and using NavaApp, you agree to be bound by these Terms & Conditions.</Text>
             <Text style={styles.termsHeading}>2. User Conduct</Text>
             <Text style={styles.termsText}>Be respectful to other users. No harassment, hate speech, or bullying.</Text>
             <Text style={styles.termsHeading}>3. Privacy</Text>
@@ -1656,15 +2018,14 @@ export default function App() {
                 <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : "height"} style={{ flex: 1 }}>
                     <ScrollView contentContainerStyle={styles.scrollContainer}>
                         <View style={styles.loginContainer}>
-                            <Text style={styles.logo}>💬</Text>
-                            <Text style={styles.title}>ChatConnect</Text>
+                            <Text style={styles.title}>NavaApp</Text>
                             <Text style={styles.subtitle}>Connect with friends</Text>
                             <TextInput style={styles.input} placeholder="Email" value={loginEmail} onChangeText={setLoginEmail} autoCapitalize="none" keyboardType="email-address" />
                             <TextInput style={styles.input} placeholder="Password" secureTextEntry value={loginPassword} onChangeText={setLoginPassword} />
                             <TouchableOpacity style={[styles.button, loginLoading && styles.buttonDisabled]} onPress={handleLogin} disabled={loginLoading}>
                                 <Text style={styles.buttonText}>{loginLoading ? "Logging in..." : "Login"}</Text>
                             </TouchableOpacity>
-                            <TouchableOpacity onPress={() => setScreen("register")}>
+                            <TouchableOpacity onPress={() => setScreen("register")}>\
                                 <Text style={styles.linkText}>Create New Account</Text>
                             </TouchableOpacity>
                             <View style={styles.footerLinks}>
@@ -1729,43 +2090,64 @@ export default function App() {
         );
     }
 
-    // ==================== DASHBOARD SCREEN ====================
-    if (screen === "dashboard" && currentUser) {
-        const pendingCount = friendRequests.length;
+    // ==================== STATUS VIEWER SCREEN ====================
+    if (screen === "statusViewer" && currentUser) {
+        const currentStatus = statusViewerItems[statusViewerIndex];
+
         return (
-            <SafeAreaView style={styles.container}>
-                <StatusBar backgroundColor="#3B82F6" barStyle="light-content" />
-                <View style={styles.dashboardHeader}>
-                    <TouchableOpacity onPress={() => setScreen("profile")} style={styles.profileButton}>
-                        {renderAvatar(currentUser, styles.headerAvatarPlaceholder, styles.headerAvatarText, currentUser.uid)}
-                        <View>
-                            <Text style={styles.welcomeText}>Hello, {currentUser.fullName}</Text>
-                            <Text style={styles.statsText}>{friendsList.length} friends • {pendingCount} requests</Text>
-                        </View>
-                    </TouchableOpacity>
+            <SafeAreaView style={styles.statusViewerContainer}>
+                <StatusBar backgroundColor="#000" barStyle="light-content" />
+                <View style={styles.statusViewerHeader}>
+                    <TouchableOpacity onPress={closeStatusViewer}><Text style={styles.backTextWhite}>← Back</Text></TouchableOpacity>
+                    <View style={styles.statusViewerTitleWrap}>
+                        <Text style={styles.statusViewerName}>{currentStatus?.ownerName || "Status"}</Text>
+                        <Text style={styles.statusViewerMeta}>{currentStatus?.createdAt ? formatTime(currentStatus.createdAt) : "Now"}</Text>
+                    </View>
+                    <Text style={styles.statusViewerCounter}>{statusViewerIndex + 1}/{statusViewerItems.length}</Text>
                 </View>
-                <View style={styles.statsRow}>
-                    <View style={styles.statCard}><Text style={styles.statNumber}>{friendsList.length}</Text><Text style={styles.statLabel}>Friends</Text></View>
-                    <View style={styles.statCard}><Text style={styles.statNumber}>{pendingCount}</Text><Text style={styles.statLabel}>Requests</Text></View>
-                    <View style={styles.statCard}><Text style={styles.statNumber}>{Object.keys(chatMessages).length}</Text><Text style={styles.statLabel}>Chats</Text></View>
-                </View>
-                <View style={styles.navRow}>
-                    <TouchableOpacity style={styles.navButton} onPress={() => { setSearchQuery(""); setScreen("home"); }}><Text style={styles.navText}>💬 Chats</Text></TouchableOpacity>
-                    <TouchableOpacity style={styles.navButton} onPress={() => { setSearchQuery(""); setScreen("friendRequests"); }}><Text style={styles.navText}>👥 Requests</Text></TouchableOpacity>
-                    <TouchableOpacity style={styles.navButton} onPress={() => { setSearchQuery(""); setScreen("findFriends"); }}><Text style={styles.navText}>🔍 Find</Text></TouchableOpacity>
+
+                <View style={styles.statusViewerBody}>
+                    {statusViewerLoading || !currentStatus ? (
+                        <ActivityIndicator size="large" color="#fff" />
+                    ) : currentStatus.mediaType === "video" ? (
+                        <>
+                            <Video
+                                source={{ uri: statusViewerUri }}
+                                style={styles.statusViewerMedia}
+                                resizeMode={ResizeMode.CONTAIN}
+                                shouldPlay
+                                useNativeControls={false}
+                                onPlaybackStatusUpdate={(playbackStatus) => {
+                                    if (playbackStatus.didJustFinish) {
+                                        advanceStatusViewer();
+                                    }
+                                }}
+                            />
+                            <View pointerEvents="box-none" style={styles.statusViewerTapOverlay}>
+                                <TouchableOpacity style={styles.statusViewerTapZone} onPress={goToPreviousStatus} />
+                                <TouchableOpacity style={styles.statusViewerTapZone} onPress={advanceStatusViewer} />
+                            </View>
+                        </>
+                    ) : (
+                        <>
+                            <Image source={{ uri: statusViewerUri }} style={styles.statusViewerMedia} resizeMode="contain" />
+                            <View pointerEvents="box-none" style={styles.statusViewerTapOverlay}>
+                                <TouchableOpacity style={styles.statusViewerTapZone} onPress={goToPreviousStatus} />
+                                <TouchableOpacity style={styles.statusViewerTapZone} onPress={advanceStatusViewer} />
+                            </View>
+                        </>
+                    )}
                 </View>
             </SafeAreaView>
         );
     }
 
-    // ==================== HOME/CHATS SCREEN ====================
-    if (screen === "home" && currentUser) {
-        const filteredFriends = friendsList.filter(f =>
-            f.fullName?.toLowerCase().includes(searchQuery.toLowerCase()) ||
-            f.email?.toLowerCase().includes(searchQuery.toLowerCase())
-        );
-
-        const sortedFriends = [...filteredFriends].sort((a, b) => {
+    // ==================== DASHBOARD SCREEN ====================
+    if (screen === "dashboard" && currentUser) {
+        const pendingCount = friendRequests.length;
+        const myStatus = statusFeed.find(status => status.ownerId === currentUser.uid);
+        const friendStatuses = statusFeed.filter(status => status.ownerId !== currentUser.uid);
+        const sortedFriends = [...friendsList].sort((a, b) => {
             const aPinned = pinnedChatIds.includes(a.id);
             const bPinned = pinnedChatIds.includes(b.id);
             if (aPinned && !bPinned) return -1;
@@ -1780,74 +2162,161 @@ export default function App() {
             const bTime = bLast?.timestamp?.toDate?.()?.getTime?.() || 0;
             return bTime - aTime;
         });
+
         return (
             <SafeAreaView style={styles.container}>
                 <StatusBar backgroundColor="#3B82F6" barStyle="light-content" />
-                <View style={styles.header}>
-                    <TouchableOpacity onPress={goBack}><Text style={styles.backTextWhite}>← Back</Text></TouchableOpacity>
-                    <Text style={styles.headerTitle}>Chats</Text>
-                    <View style={{ width: 50 }} />
+                <View style={styles.dashboardHeader}>
+                    <TouchableOpacity onPress={() => setScreen("profile")} style={styles.profileButton}>
+                        {renderAvatar(currentUser, styles.headerAvatarPlaceholder, styles.headerAvatarText, currentUser.uid)}
+                        <View>
+                            <Text style={styles.welcomeText}>Hello, {currentUser.fullName}</Text>
+                            <Text style={styles.statsText}>{friendsList.length} friends • {pendingCount} requests</Text>
+                        </View>
+                    </TouchableOpacity>
                 </View>
-                <View style={styles.searchBar}><TextInput style={styles.searchInput} placeholder="Search friends..." value={searchQuery} onChangeText={setSearchQuery} /></View>
-                {friendsList.length === 0 ? (
-                    <View style={styles.emptyState}><Text style={styles.emptyText}>No friends yet</Text><TouchableOpacity onPress={() => setScreen("findFriends")}><Text style={styles.linkText}>Find friends</Text></TouchableOpacity></View>
-                ) : (
-                    <FlatList
-                        data={sortedFriends}
-                        keyExtractor={item => item.id}
-                        renderItem={({ item }) => {
-                            const chatId = [currentUser.uid, item.id].sort().join('_');
-                            const messages = chatMessages[chatId] || [];
-                            const lastMsg = messages[messages.length - 1];
-                            const unreadCount = messages.filter(m => m.senderId === item.id && !m.read).length;
-                            const isPinned = pinnedChatIds.includes(item.id);
-                            const isBlocked = isBlockedRelationship(item.id);
-                            return (
+                <FlatList
+                    data={sortedFriends}
+                    keyExtractor={item => item.id}
+                    style={styles.dashboardList}
+                    contentContainerStyle={styles.dashboardListContent}
+                    ListHeaderComponent={
+                        <>
+                            <View style={styles.statusSection}>
+                                <Text style={styles.sectionTitle}>Status</Text>
+                                <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.statusRow}>
+                                    <TouchableOpacity
+                                        style={styles.statusCard}
+                                        onPress={() => {
+                                            if (myStatus) {
+                                                openStatusViewer([myStatus], 0, "dashboard");
+                                                return;
+                                            }
+                                            pickStatusMedia();
+                                        }}
+                                        onLongPress={pickStatusMedia}
+                                    >
+                                        <View style={styles.statusAvatarWrap}>
+                                            {renderAvatar(currentUser, styles.statusAvatar, styles.avatarText, currentUser.uid)}
+                                            <View style={styles.statusPlusBadge}><Text style={styles.statusPlusText}>+</Text></View>
+                                        </View>
+                                        <Text style={styles.statusName}>My Status</Text>
+                                        <Text style={styles.statusMeta}>{myStatus ? "Tap to view, hold to update" : "Add photo or video"}</Text>
+                                    </TouchableOpacity>
+
+                                    {friendStatuses.map((status, index) => (
+                                        <TouchableOpacity
+                                            key={status.ownerId}
+                                            style={styles.statusCard}
+                                            onPress={() => openStatusViewer(friendStatuses, index, "dashboard")}
+                                        >
+                                            <View style={styles.statusFriendRing}>
+                                                {renderAvatar({ fullName: status.ownerName, photoUri: status.ownerPhotoUri, id: status.ownerId }, styles.statusAvatar, styles.avatarText, status.ownerId)}
+                                            </View>
+                                            <Text style={styles.statusName} numberOfLines={1}>{status.ownerName}</Text>
+                                            <Text style={styles.statusMeta}>{status.mediaType === "video" ? "Video status" : "Photo status"}</Text>
+                                        </TouchableOpacity>
+                                    ))}
+                                    {friendStatuses.length === 0 && (
+                                        <View style={styles.statusPlaceholderCard}>
+                                            <View style={styles.statusPlaceholderAvatar}>
+                                                <Text style={styles.statusPlaceholderIcon}>○</Text>
+                                            </View>
+                                            <Text style={styles.statusName}>No friend status</Text>
+                                            <Text style={styles.statusMeta}>Statuses from friends will show here</Text>
+                                        </View>
+                                    )}
+                                </ScrollView>
+                            </View>
+                            <View style={styles.dashboardActionsRow}>
                                 <TouchableOpacity
-                                    style={[styles.chatItem, isBlocked && styles.chatItemBlocked]}
+                                    style={styles.dashboardActionCard}
                                     onPress={() => {
-                                        if (isBlocked) {
-                                            Alert.alert("Blocked", "This chat is unavailable because a block is active.");
-                                            return;
-                                        }
-                                        setSelectedFriend(item);
-                                        setScreen("chat");
-                                    }}
-                                    onLongPress={() => {
-                                        setUserPreviewReturnScreen("home");
-                                        setViewProfileUser(item);
-                                        setScreen("userPreview");
+                                        setSearchQuery("");
+                                        setScreen("friendRequests");
                                     }}
                                 >
-                                    <View style={styles.avatarContainer}>
-                                        {renderAvatar(item, styles.avatarPlaceholder, styles.avatarText, item.uid)}
-                                    </View>
-                                    <View style={styles.chatInfo}>
-                                        <View style={styles.chatNameRow}>
-                                            <Text style={styles.chatName}>{item.fullName}</Text>
-                                            {isPinned && <Text style={styles.pinnedBadge}>📌</Text>}
-                                        </View>
-                                        <Text style={styles.chatPreview} numberOfLines={1}>
-                                            {isBlocked
-                                                ? "Blocked conversation"
-                                                : lastMsg
-                                                    ? (lastMsg.senderId === currentUser.uid ? `You: ${lastMsg.text}` : lastMsg.text)
-                                                    : "Tap to start chatting"}
-                                        </Text>
-                                    </View>
-                                    <View style={styles.chatRight}>
-                                        {lastMsg && <Text style={styles.chatTime}>{formatTime(lastMsg.timestamp)}</Text>}
-                                        {unreadCount > 0 && (
-                                            <View style={styles.unreadBadge}>
-                                                <Text style={styles.unreadBadgeText}>{unreadCount > 99 ? '99+' : unreadCount}</Text>
-                                            </View>
-                                        )}
-                                    </View>
+                                    <Text style={styles.dashboardActionTitle}>Requests</Text>
+                                    <Text style={styles.dashboardActionMeta}>
+                                        {pendingCount > 0 ? `${pendingCount} pending` : "No pending requests"}
+                                    </Text>
                                 </TouchableOpacity>
-                            );
-                        }}
-                    />
-                )}
+                                <TouchableOpacity
+                                    style={styles.dashboardActionCard}
+                                    onPress={() => {
+                                        setSearchQuery("");
+                                        setScreen("findFriends");
+                                    }}
+                                >
+                                    <Text style={styles.dashboardActionTitle}>Find Friends</Text>
+                                    <Text style={styles.dashboardActionMeta}>Add new people</Text>
+                                </TouchableOpacity>
+                            </View>
+                            <View style={styles.chatsSectionHeader}>
+                                <Text style={styles.sectionTitle}>Chats</Text>
+                            </View>
+                        </>
+                    }
+                    ListEmptyComponent={() => (
+                        <View style={styles.emptyState}>
+                            <Text style={styles.emptyText}>No chats yet</Text>
+                            <TouchableOpacity onPress={() => setScreen("findFriends")}>
+                                <Text style={styles.linkText}>Find friends</Text>
+                            </TouchableOpacity>
+                        </View>
+                    )}
+                    renderItem={({ item }) => {
+                        const chatId = [currentUser.uid, item.id].sort().join('_');
+                        const messages = chatMessages[chatId] || [];
+                        const lastMsg = messages[messages.length - 1];
+                        const unreadCount = messages.filter(m => m.senderId === item.id && !m.read).length;
+                        const isPinned = pinnedChatIds.includes(item.id);
+                        const isBlocked = isBlockedRelationship(item.id);
+                        return (
+                            <TouchableOpacity
+                                style={[styles.chatItem, isBlocked && styles.chatItemBlocked]}
+                                onPress={() => {
+                                    if (isBlocked) {
+                                        Alert.alert("Blocked", "This chat is unavailable because a block is active.");
+                                        return;
+                                    }
+                                    setSelectedFriend(item);
+                                    setScreen("chat");
+                                }}
+                                onLongPress={() => {
+                                    setUserPreviewReturnScreen("dashboard");
+                                    setViewProfileUser(item);
+                                    setScreen("userPreview");
+                                }}
+                            >
+                                <View style={styles.avatarContainer}>
+                                    {renderAvatar(item, styles.avatarPlaceholder, styles.avatarText, item.uid)}
+                                </View>
+                                <View style={styles.chatInfo}>
+                                    <View style={styles.chatNameRow}>
+                                        <Text style={styles.chatName}>{item.fullName}</Text>
+                                        {isPinned && <Text style={styles.pinnedBadge}>📌</Text>}
+                                    </View>
+                                    <Text style={styles.chatPreview} numberOfLines={1}>
+                                        {isBlocked
+                                            ? "Blocked conversation"
+                                            : lastMsg
+                                                ? (lastMsg.senderId === currentUser.uid ? `You: ${lastMsg.text}` : lastMsg.text)
+                                                : "Tap to start chatting"}
+                                    </Text>
+                                </View>
+                                <View style={styles.chatRight}>
+                                    {lastMsg && <Text style={styles.chatTime}>{formatTime(lastMsg.timestamp)}</Text>}
+                                    {unreadCount > 0 && (
+                                        <View style={styles.unreadBadge}>
+                                            <Text style={styles.unreadBadgeText}>{unreadCount > 99 ? '99+' : unreadCount}</Text>
+                                        </View>
+                                    )}
+                                </View>
+                            </TouchableOpacity>
+                        );
+                    }}
+                />
             </SafeAreaView>
         );
     }
@@ -1864,15 +2333,14 @@ export default function App() {
         const sortedMessages = [...visibleMessages].sort((a, b) => (a.timestamp?.toDate?.() || 0) - (b.timestamp?.toDate?.() || 0));
         const activeTheme = CHAT_THEMES[chatTheme] || CHAT_THEMES.default;
 
-        const ChatWrapper = Platform.OS === "ios" ? KeyboardAvoidingView : View;
         const wrapperProps = Platform.OS === "ios"
-            ? { style: { flex: 1 }, behavior: "padding", keyboardVerticalOffset: 12 }
-            : { style: { flex: 1 } };
+            ? { style: { flex: 1 }, behavior: "padding", keyboardVerticalOffset: 0 }
+            : { style: { flex: 1 }, behavior: "padding", keyboardVerticalOffset: 0 };
 
         return (
             <SafeAreaView style={styles.container}>
                 <StatusBar backgroundColor="#3B82F6" barStyle="light-content" />
-                <ChatWrapper {...wrapperProps}>
+                <KeyboardAvoidingView {...wrapperProps}>
                     <View style={styles.chatHeader}>
                         <TouchableOpacity onPress={goBack}><Text style={styles.backTextWhite}>← Back</Text></TouchableOpacity>
                         <TouchableOpacity
@@ -2017,7 +2485,7 @@ export default function App() {
                             </Pressable>
                         </Pressable>
                     </Modal>
-                </ChatWrapper>
+                </KeyboardAvoidingView>
             </SafeAreaView>
         );
     }
@@ -2082,11 +2550,24 @@ export default function App() {
                         {editingProfile ? (
                             <>
                                 <TextInput style={styles.editInput} value={editName} onChangeText={setEditName} placeholder="Full Name" />
+                                <TextInput
+                                    style={styles.editInput}
+                                    value={editPhone}
+                                    onChangeText={setEditPhone}
+                                    placeholder="Phone Number (optional)"
+                                    keyboardType="phone-pad"
+                                />
                                 <View style={styles.editButtons}>
                                     <TouchableOpacity onPress={() => setEditingProfile(false)}><Text style={styles.cancelText}>Cancel</Text></TouchableOpacity>
                                     <TouchableOpacity onPress={async () => {
+                                        const trimmedPhone = editPhone.trim();
+                                        if (trimmedPhone.length > 30) {
+                                            Alert.alert("Error", "Phone number must be 30 characters or less");
+                                            return;
+                                        }
                                         await getFirestore().collection('users').doc(currentUser.uid).update({ fullName: editName });
-                                        setCurrentUser({ ...currentUser, fullName: editName });
+                                        await getFirestore().collection('privateProfiles').doc(currentUser.uid).set({ phone: trimmedPhone }, { merge: true });
+                                        setCurrentUser({ ...currentUser, fullName: editName, phone: trimmedPhone });
                                         setEditingProfile(false);
                                         Alert.alert("Success", "Profile updated");
                                     }}><Text style={styles.saveText}>Save</Text></TouchableOpacity>
@@ -2096,8 +2577,9 @@ export default function App() {
                             <>
                                 <Text style={styles.profileName}>{currentUser.fullName}</Text>
                                 <Text style={styles.profileUsername}>{currentUser.email}</Text>
+                                <Text style={styles.profileUsername}>{currentUser.phone ? currentUser.phone : "No phone number added"}</Text>
                                 <Text style={styles.profileBio}>{currentUser.bio}</Text>
-                                <TouchableOpacity style={styles.editProfileButton} onPress={() => { setEditingProfile(true); setEditName(currentUser.fullName); }}>
+                                <TouchableOpacity style={styles.editProfileButton} onPress={() => { setEditingProfile(true); setEditName(currentUser.fullName); setEditPhone(currentUser.phone || ""); }}>
                                     <Text style={styles.editProfileText}>Edit Profile</Text>
                                 </TouchableOpacity>
                             </>
@@ -2135,6 +2617,7 @@ export default function App() {
         const isFriend = (userId) => friendsList.some(f => f.id === userId);
         const isRequestSent = (userId) => friendRequests.some(r => r.from === currentUser.uid && r.to === userId);
         const isRequestReceived = (userId) => friendRequests.some(r => r.from === userId && r.to === currentUser.uid);
+        const isDeviceContact = (email) => deviceContactEmails.includes(email?.toLowerCase());
         const filteredUsers = allUsers.filter((u) => {
             if (isBlockedRelationship(u.id)) {
                 return false;
@@ -2142,9 +2625,19 @@ export default function App() {
 
             const lowerQuery = searchQuery.toLowerCase();
             return (
-                u.fullName?.toLowerCase().includes(lowerQuery) ||
-                u.email?.toLowerCase().includes(lowerQuery)
+                u.fullName?.toLowerCase().includes(lowerQuery)
             );
+        }).sort((a, b) => {
+            // 1. Device contacts first
+            const aContact = isDeviceContact(a.email) ? 0 : 1;
+            const bContact = isDeviceContact(b.email) ? 0 : 1;
+            if (aContact !== bContact) return aContact - bContact;
+            // 2. Same country next
+            const aCountry = (a.country && a.country === userCountry) ? 0 : 1;
+            const bCountry = (b.country && b.country === userCountry) ? 0 : 1;
+            if (aCountry !== bCountry) return aCountry - bCountry;
+            // 3. Alphabetical
+            return (a.fullName || "").localeCompare(b.fullName || "");
         });
         return (
             <SafeAreaView style={styles.container}>
@@ -2154,7 +2647,7 @@ export default function App() {
                     <Text style={styles.headerTitle}>Find Friends</Text>
                     <View style={{ width: 50 }} />
                 </View>
-                <View style={styles.searchBar}><TextInput style={styles.searchInput} placeholder="Search by name or email..." value={searchQuery} onChangeText={setSearchQuery} /></View>
+                <View style={styles.searchBar}><TextInput style={styles.searchInput} placeholder="Search by name..." value={searchQuery} onChangeText={setSearchQuery} /></View>
                 <FlatList
                     data={filteredUsers}
                     keyExtractor={item => item.id}
@@ -2164,7 +2657,7 @@ export default function App() {
                                 {renderAvatar(item, styles.userAvatarPlaceholder, styles.avatarText, item.id)}
                                 <View>
                                     <Text style={styles.userName}>{item.fullName}</Text>
-                                    <Text style={styles.userUsername}>{item.email}</Text>
+                                    <Text style={styles.userUsername}>{isDeviceContact(item.email) ? "📱 In your contacts" : item.country || "NavaApp user"}</Text>
                                 </View>
                             </TouchableOpacity>
                             {isFriend(item.id) ? (
@@ -2217,7 +2710,7 @@ export default function App() {
                     <View style={styles.profileHeader}>
                         {renderAvatar(viewProfileUser, styles.contactProfileImage, styles.profileImageText, viewProfileUser.id)}
                         <Text style={styles.profileName}>{viewProfileUser.fullName}</Text>
-                        <Text style={styles.profileUsername}>{viewProfileUser.email}</Text>
+                        <Text style={styles.profileUsername}>{isFriend || viewProfileUser.id === currentUser.uid ? viewProfileUser.email : (viewProfileUser.country || "NavaApp user")}</Text>
                         {viewProfileUser.bio ? <Text style={styles.profileBio}>{viewProfileUser.bio}</Text> : null}
                     </View>
 
@@ -2289,13 +2782,23 @@ export default function App() {
 
                     {/* Contact Details */}
                     <View style={up.section}>
-                        <View style={up.row}>
-                            <Text style={up.rowIcon}>📧</Text>
-                            <View style={{ flex: 1 }}>
-                                <Text style={up.rowText}>{viewProfileUser.email}</Text>
-                                <Text style={up.rowSubtext}>Email</Text>
+                        {(isFriend || viewProfileUser.id === currentUser.uid) ? (
+                            <View style={up.row}>
+                                <Text style={up.rowIcon}>📧</Text>
+                                <View style={{ flex: 1 }}>
+                                    <Text style={up.rowText}>{viewProfileUser.email}</Text>
+                                    <Text style={up.rowSubtext}>Email</Text>
+                                </View>
                             </View>
-                        </View>
+                        ) : (
+                            <View style={up.row}>
+                                <Text style={up.rowIcon}>🔒</Text>
+                                <View style={{ flex: 1 }}>
+                                    <Text style={up.rowText}>Hidden</Text>
+                                    <Text style={up.rowSubtext}>Add as friend to see contact info</Text>
+                                </View>
+                            </View>
+                        )}
                         {viewProfileUser.bio && (
                             <>
                                 <View style={up.divider} />
@@ -2408,8 +2911,147 @@ const styles = StyleSheet.create({
     backTextWhite: { fontSize: 16, color: "#FFFFFF", fontWeight: "600" },
     loginContainer: { backgroundColor: "white", borderRadius: 24, padding: 28, shadowColor: "#000", shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.1, shadowRadius: 8, elevation: 5 },
     registerContainer: { backgroundColor: "white", borderRadius: 24, padding: 28, shadowColor: "#000", shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.1, shadowRadius: 8, elevation: 5 },
-    logo: { fontSize: 62, textAlign: "center", marginBottom: 10 },
-    title: { fontSize: 30, fontWeight: "800", color: "#3B82F6", textAlign: "center", marginBottom: 8 },
+    logoMark: {
+        width: 180,
+        height: 180,
+        alignSelf: "center",
+        marginBottom: 10,
+        position: "relative",
+    },
+    logoEdge: {
+        position: "absolute",
+        height: 12,
+        borderRadius: 8,
+        backgroundColor: "#1f4478",
+    },
+    logoEdgeTopLeft: {
+        position: "absolute",
+        top: 37,
+        left: 45,
+        width: 50,
+        transform: [{ rotate: "-31deg" }],
+    },
+    logoEdgeTopRight: {
+        position: "absolute",
+        top: 37,
+        right: 45,
+        width: 50,
+        transform: [{ rotate: "31deg" }],
+    },
+    logoEdgeLeft: {
+        position: "absolute",
+        top: 63,
+        left: 24,
+        width: 12,
+        height: 50,
+    },
+    logoEdgeRight: {
+        position: "absolute",
+        top: 63,
+        right: 24,
+        width: 12,
+        height: 50,
+    },
+    logoEdgeBottomLeft: {
+        position: "absolute",
+        bottom: 42,
+        left: 45,
+        width: 50,
+        transform: [{ rotate: "31deg" }],
+    },
+    logoEdgeBottomRight: {
+        position: "absolute",
+        bottom: 42,
+        right: 45,
+        width: 50,
+        transform: [{ rotate: "-31deg" }],
+    },
+
+    logoInnerLink: {
+        position: "absolute",
+        backgroundColor: "#5f78a2",
+        borderRadius: 6,
+    },
+    logoInnerTopStem: {
+        position: "absolute",
+        top: 35,
+        left: 86,
+        width: 8,
+        height: 38,
+        borderRadius: 6,
+    },
+    logoInnerUpperRight: {
+        position: "absolute",
+        top: 68,
+        left: 92,
+        width: 48,
+        height: 8,
+        transform: [{ rotate: "31deg" }],
+    },
+    logoInnerLeftDiagonal: {
+        position: "absolute",
+        top: 96,
+        left: 48,
+        width: 46,
+        height: 8,
+        transform: [{ rotate: "-32deg" }],
+    },
+    logoInnerRightDiagonal: {
+        position: "absolute",
+        top: 103,
+        left: 100,
+        width: 42,
+        height: 8,
+        transform: [{ rotate: "35deg" }],
+    },
+    logoInnerBottomStem: {
+        position: "absolute",
+        top: 116,
+        left: 86,
+        width: 8,
+        height: 30,
+    },
+
+    logoNode: {
+        position: "absolute",
+        width: 34,
+        height: 34,
+        borderRadius: 17,
+        backgroundColor: "#1f4478",
+    },
+    logoNodeTop: {
+        top: 20,
+        left: 73,
+    },
+    logoNodeTopLeft: {
+        top: 55,
+        left: 18,
+    },
+    logoNodeTopRight: {
+        top: 55,
+        right: 18,
+    },
+    logoNodeBottomLeft: {
+        top: 111,
+        left: 18,
+    },
+    logoNodeBottom: {
+        top: 146,
+        left: 73,
+    },
+    logoNodeBottomRightAccent: {
+        top: 111,
+        right: 12,
+        backgroundColor: "#5ca3ea",
+    },
+    logoNodeInner: {
+        width: 30,
+        height: 30,
+        borderRadius: 15,
+        top: 90,
+        left: 96,
+    },
+    title: { fontSize: 30, fontWeight: "800", color: "#2b4877", textAlign: "center", marginBottom: 8 },
     subtitle: { fontSize: 15, color: "#666", textAlign: "center", marginBottom: 28 },
     input: { borderWidth: 1, borderColor: "#ddd", borderRadius: 16, padding: 14, fontSize: 16, marginBottom: 15, backgroundColor: "#fff" },
     editInput: { borderWidth: 1, borderColor: "#ddd", borderRadius: 10, padding: 12, fontSize: 16, marginTop: 15, width: "80%" },
@@ -2437,9 +3079,26 @@ const styles = StyleSheet.create({
     statCard: { alignItems: "center" },
     statNumber: { fontSize: 24, fontWeight: "bold", color: "#3B82F6" },
     statLabel: { fontSize: 12, color: "#666", marginTop: 5 },
-    navRow: { flexDirection: "row", justifyContent: "space-around", padding: 18, backgroundColor: "white", marginHorizontal: 15, borderRadius: 20, marginBottom: 15 },
-    navButton: { alignItems: "center", padding: 10 },
-    navText: { fontSize: 14, color: "#333", fontWeight: "600" },
+    dashboardList: { flex: 1 },
+    dashboardListContent: { paddingBottom: 10 },
+    dashboardActionsRow: { flexDirection: "row", gap: 12, marginHorizontal: 15, marginBottom: 15 },
+    dashboardActionCard: { flex: 1, backgroundColor: "white", borderRadius: 20, paddingHorizontal: 18, paddingVertical: 18 },
+    dashboardActionTitle: { fontSize: 16, fontWeight: "700", color: "#111827", marginBottom: 6 },
+    dashboardActionMeta: { fontSize: 13, color: "#6B7280" },
+    chatsSectionHeader: { backgroundColor: "white", marginHorizontal: 15, marginBottom: 8, paddingHorizontal: 20, paddingVertical: 16, borderRadius: 20 },
+    statusSection: { backgroundColor: "white", marginHorizontal: 15, marginBottom: 15, paddingVertical: 18, borderRadius: 20 },
+    statusRow: { paddingHorizontal: 15 },
+    statusCard: { width: 110, marginRight: 14, alignItems: "center" },
+    statusPlaceholderCard: { width: 140, marginRight: 14, alignItems: "center", justifyContent: "center", paddingVertical: 10 },
+    statusPlaceholderAvatar: { width: 68, height: 68, borderRadius: 34, backgroundColor: "#eef2ff", alignItems: "center", justifyContent: "center", marginBottom: 8 },
+    statusPlaceholderIcon: { fontSize: 24, color: "#94a3b8", fontWeight: "700" },
+    statusAvatarWrap: { position: "relative", marginBottom: 8 },
+    statusAvatar: { width: 68, height: 68, borderRadius: 34, justifyContent: "center", alignItems: "center" },
+    statusFriendRing: { padding: 3, borderRadius: 40, borderWidth: 2, borderColor: "#22c55e", marginBottom: 8 },
+    statusPlusBadge: { position: "absolute", right: -2, bottom: -2, width: 22, height: 22, borderRadius: 11, backgroundColor: "#3B82F6", alignItems: "center", justifyContent: "center", borderWidth: 2, borderColor: "white" },
+    statusPlusText: { color: "white", fontSize: 15, fontWeight: "bold", lineHeight: 16 },
+    statusName: { fontSize: 13, fontWeight: "700", color: "#111827", textAlign: "center" },
+    statusMeta: { fontSize: 11, color: "#6b7280", marginTop: 4, textAlign: "center" },
     header: { backgroundColor: "#3B82F6", padding: 18, paddingTop: 54, flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
     headerTitle: { color: "white", fontSize: 18, fontWeight: "700" },
     searchBar: { backgroundColor: "white", padding: 12, borderBottomWidth: 1, borderBottomColor: "#eee" },
@@ -2554,6 +3213,16 @@ const styles = StyleSheet.create({
     termsTitle: { fontSize: 24, fontWeight: "bold", color: "#3B82F6", marginBottom: 20, textAlign: "center" },
     termsHeading: { fontSize: 18, fontWeight: "bold", marginTop: 15, marginBottom: 10, color: "#333" },
     termsText: { fontSize: 14, color: "#666", marginBottom: 10, lineHeight: 22 },
+    statusViewerContainer: { flex: 1, backgroundColor: "#000" },
+    statusViewerHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: 18, paddingTop: 20, paddingBottom: 12 },
+    statusViewerTitleWrap: { flex: 1, marginHorizontal: 14 },
+    statusViewerName: { color: "white", fontSize: 17, fontWeight: "700" },
+    statusViewerMeta: { color: "rgba(255,255,255,0.7)", fontSize: 12, marginTop: 2 },
+    statusViewerCounter: { color: "white", fontSize: 12, fontWeight: "700" },
+    statusViewerBody: { flex: 1, alignItems: "center", justifyContent: "center", padding: 12 },
+    statusViewerMedia: { width: "100%", height: "100%" },
+    statusViewerTapOverlay: { ...StyleSheet.absoluteFillObject, flexDirection: "row" },
+    statusViewerTapZone: { flex: 1 },
     // Call Styles
     callContainer: { flex: 1, backgroundColor: "#1a1a2e", justifyContent: "space-between" },
     callContent: { flex: 1, justifyContent: "center", alignItems: "center", paddingTop: 60 },
